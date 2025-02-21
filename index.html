@@ -170,6 +170,8 @@ function copyToClipboard(text) {
           if (current_arch == ARCH_X86_64) {
               include_powershell = true;
               arch_os = "x86_64-windows";
+          } else if (current_arch == ARCH_AARCH64) {
+              arch_os = "aarch64-windows";
           }
       }
 
