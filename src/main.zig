@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const build_options = @import("build_options");
 const assert = std.debug.assert;
 const io = std.io;
 const fs = std.fs;
@@ -26,6 +27,8 @@ const log = std.log;
 pub const std_options: std.Options = .{
     .logFn = anyzigLog,
 };
+
+const exe_str = @tagName(build_options.exe);
 
 fn anyzigLog(
     comptime level: std.log.Level,
@@ -213,7 +216,7 @@ pub fn main() !void {
                 );
                 std.process.exit(0xff);
             }
-            if (std.mem.eql(u8, command, "init") or std.mem.eql(u8, command, "init-exe") or std.mem.eql(u8, command, "init-lib")) {
+            if (build_options.exe == .zig and (std.mem.eql(u8, command, "init") or std.mem.eql(u8, command, "init-exe") or std.mem.eql(u8, command, "init-lib"))) {
                 if (manual_version) |version| break :blk .{ version, true };
                 try std.io.getStdErr().writer().print(
                     "error: anyzig init requires a version, i.e. 'zig 0.13.0 {s}'\n",
@@ -225,7 +228,7 @@ pub fn main() !void {
         if (manual_version) |version| break :blk .{ version, false };
         const build_root = try findBuildRoot(arena, .{}) orelse {
             try std.io.getStdErr().writeAll("anyzig: no build.zig\n" ++
-                "run 'zig VERSION' to specify a version, or, run from a directory with a build.zig file.\n");
+                "run '" ++ exe_str ++ " VERSION' to specify a version, or, run from a directory with a build.zig file.\n");
             std.process.exit(0xff);
         };
         break :blk .{ try determineZigVersion(arena, build_root), false };
@@ -235,7 +238,7 @@ pub fn main() !void {
     defer arena.free(app_data_path);
     log.info("appdata '{s}'", .{app_data_path});
 
-    const store_path = try std.fs.path.join(arena, &.{ app_data_path, "hashstore" });
+    const store_path = try std.fs.path.join(arena, &.{ app_data_path, "hashstore-" ++ exe_str });
     defer arena.free(store_path);
 
     var find_hash_error_count: u32 = 0;
@@ -302,8 +305,8 @@ pub fn main() !void {
         break :blk hash;
     };
 
-    const versioned_zig = try global_cache_directory.joinZ(arena, &.{ &hash.path, "zig" });
-    defer arena.free(versioned_zig);
+    const versioned_exe = try global_cache_directory.joinZ(arena, &.{ &hash.path, exe_str });
+    defer arena.free(versioned_exe);
 
     const stay_alive = is_init or (builtin.os.tag == .windows);
 
@@ -312,7 +315,7 @@ pub fn main() !void {
         // TODO: if on windows, create a job so our child process gets killed if
         //       our process gets killed
         var al: ArrayListUnmanaged([]const u8) = .{};
-        try al.append(arena, versioned_zig);
+        try al.append(arena, versioned_exe);
         for (all_args[argv_index..]) |arg| {
             try al.append(arena, arg);
         }
@@ -361,14 +364,14 @@ pub fn main() !void {
     if (!stay_alive) {
         const argv = blk: {
             var al: ArrayListUnmanaged(?[*:0]const u8) = .{};
-            try al.append(arena, versioned_zig);
+            try al.append(arena, versioned_exe);
             for (std.os.argv[argv_index..]) |arg| {
                 try al.append(arena, arg);
             }
             break :blk try al.toOwnedSliceSentinel(arena, null);
         };
-        const err = std.posix.execveZ(versioned_zig, argv, @ptrCast(std.os.environ.ptr));
-        log.err("exec '{s}' failed with {s}", .{ versioned_zig, @errorName(err) });
+        const err = std.posix.execveZ(versioned_exe, argv, @ptrCast(std.os.environ.ptr));
+        log.err("exec '{s}' failed with {s}", .{ versioned_exe, @errorName(err) });
         process.exit(0xff);
     }
 }
@@ -438,6 +441,12 @@ fn getVersionUrl(
     version: []const u8,
     arch_os: []const u8,
 ) !DownloadUrl {
+    if (build_options.exe == .zls) return DownloadUrl.initOfficial(std.fmt.allocPrint(
+        arena,
+        "https://builds.zigtools.org/zls-{s}-{s}.zip",
+        .{ url_platform, version },
+    ) catch |e| oom(e));
+
     if (!isMachVersion(version)) return switch (determineVersionKind(version)) {
         .dev => DownloadUrl.initOfficial(try std.fmt.allocPrint(
             arena,

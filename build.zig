@@ -2,6 +2,8 @@ const builtin = @import("builtin");
 const std = @import("std");
 const zig = @import("zig");
 
+const Exe = enum { zig, zls };
+
 pub fn build(b: *std.Build) !void {
     const zig_dep = b.dependency("zig", .{});
 
@@ -27,6 +29,7 @@ pub fn build(b: *std.Build) !void {
             .single_threaded = true,
         });
         exe.root_module.addImport("zig", zig_mod);
+        setBuildOptions(b, exe, .zig);
         const install = b.addInstallArtifact(exe, .{});
         b.getInstallStep().dependOn(&install.step);
 
@@ -38,6 +41,27 @@ pub fn build(b: *std.Build) !void {
         b.step("run", "").dependOn(&run.step);
         break :blk exe;
     };
+
+    {
+        const exe = b.addExecutable(.{
+            .name = "zls",
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .single_threaded = true,
+        });
+        exe.root_module.addImport("zig", zig_mod);
+        setBuildOptions(b, exe, .zls);
+        const install = b.addInstallArtifact(exe, .{});
+        b.getInstallStep().dependOn(&install.step);
+
+        const run = b.addRunArtifact(exe);
+        run.step.dependOn(&install.step);
+        if (b.args) |args| {
+            run.addArgs(args);
+        }
+        b.step("zls", "").dependOn(&run.step);
+    }
 
     const test_step = b.step("test", "");
     addTests(b, anyzig, test_step, .{ .make_build_steps = true });
@@ -55,6 +79,12 @@ pub fn build(b: *std.Build) !void {
     ci_step.dependOn(b.getInstallStep());
     ci_step.dependOn(test_step);
     try ci(b, zig_mod, ci_step, host_zip_exe);
+}
+
+fn setBuildOptions(b: *std.Build, exe: *std.Build.Step.Compile, exe_kind: Exe) void {
+    const o = b.addOptions();
+    o.addOption(Exe, "exe", exe_kind);
+    exe.root_module.addOptions("build_options", o);
 }
 
 const SharedTestOptions = struct {
@@ -261,21 +291,38 @@ fn ci(
             .{ .arch_os_abi = ci_target_str },
         ));
         const optimize: std.builtin.OptimizeMode = .ReleaseSafe;
-        const exe = b.addExecutable(.{
+
+        const target_dest_dir: std.Build.InstallDir = .{ .custom = ci_target_str };
+
+        const install_exes = b.step(b.fmt("install-{s}", .{ci_target_str}), "");
+        ci_step.dependOn(install_exes);
+        const zig_exe = b.addExecutable(.{
             .name = "zig",
             .root_source_file = b.path("src/main.zig"),
             .target = target,
             .optimize = optimize,
             .single_threaded = true,
         });
-        exe.root_module.addImport("zig", zig_mod);
-        const install = b.addInstallArtifact(exe, .{
-            .dest_dir = .{ .override = .{ .custom = ci_target_str } },
+        zig_exe.root_module.addImport("zig", zig_mod);
+        setBuildOptions(b, zig_exe, .zig);
+        install_exes.dependOn(
+            &b.addInstallArtifact(zig_exe, .{ .dest_dir = .{ .override = target_dest_dir } }).step,
+        );
+        const zls_exe = b.addExecutable(.{
+            .name = "zls",
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .single_threaded = true,
         });
-        ci_step.dependOn(&install.step);
+        zls_exe.root_module.addImport("zig", zig_mod);
+        setBuildOptions(b, zls_exe, .zls);
+        install_exes.dependOn(
+            &b.addInstallArtifact(zls_exe, .{ .dest_dir = .{ .override = target_dest_dir } }).step,
+        );
 
         const target_test_step = b.step(b.fmt("test-{s}", .{ci_target_str}), "");
-        addTests(b, exe, target_test_step, .{
+        addTests(b, zig_exe, target_test_step, .{
             .make_build_steps = false,
             // This doesn't seem to be working, so we're only adding these tests
             // as a dependency if we see the arch is compatible beforehand
@@ -292,7 +339,8 @@ fn ci(
                 b,
                 ci_target_str,
                 target.result,
-                install,
+                target_dest_dir,
+                install_exes,
                 host_zip_exe,
             ));
         }
@@ -303,7 +351,8 @@ fn makeCiArchiveStep(
     b: *std.Build,
     ci_target_str: []const u8,
     target: std.Target,
-    exe_install: *std.Build.Step.InstallArtifact,
+    target_install_dir: std.Build.InstallDir,
+    install_exes: *std.Build.Step,
     host_zip_exe: *std.Build.Step.Compile,
 ) *std.Build.Step {
     const install_path = b.getInstallPath(.prefix, ".");
@@ -317,11 +366,13 @@ fn makeCiArchiveStep(
         zip.addArg(out_zip_file);
         zip.addArg("zig.exe");
         zip.addArg("zig.pdb");
+        zip.addArg("zls.exe");
+        zip.addArg("zls.pdb");
         zip.cwd = .{ .cwd_relative = b.getInstallPath(
-            exe_install.dest_dir.?,
+            target_install_dir,
             ".",
         ) };
-        zip.step.dependOn(&exe_install.step);
+        zip.step.dependOn(install_exes);
         return &zip.step;
     }
 
@@ -334,11 +385,12 @@ fn makeCiArchiveStep(
         "-czf",
         targz,
         "zig",
+        "zls",
     });
     tar.cwd = .{ .cwd_relative = b.getInstallPath(
-        exe_install.dest_dir.?,
+        target_install_dir,
         ".",
     ) };
-    tar.step.dependOn(&exe_install.step);
+    tar.step.dependOn(install_exes);
     return &tar.step;
 }
