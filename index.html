@@ -75,7 +75,6 @@ code {
 </style>
 <script>
 
-const version = "v2025_03_05";
 function get(id) { return document.getElementById(id); }
 
 
@@ -179,7 +178,7 @@ function copyToClipboard(text) {
 
       if (arch_os != null) {
           const basename = 'anyzig-' + arch_os + archive_ext;
-          const archive_url = 'https://github.com/marler8997/anyzig/releases/download/' + version + '/' + basename;
+          const archive_url = 'https://github.com/marler8997/anyzig/releases/latest/download/' + basename;
           html += '<br/><h2 style="margin:15px"><a href="' + archive_url + '">' + basename + '</a></h2>';
 
           html += '<br/><h2>Command Line Install:</h2>';
@@ -192,7 +191,7 @@ function copyToClipboard(text) {
               html += generateCommandHtml(ids, 'wget -O - ' + archive_url + ' | tar xz');
           }
           if (include_powershell) {
-              html += generateCommandHtml(ids, "Invoke-WebRequest -Uri " + archive_url + " -OutFile \"anyzig-"  + arch_os + ".zip\"; Expand-Archive -Path \"anyzig-" + arch_os + ".zip\" -DestinationPath \"anyzig-" + version + "\"");
+              html += generateCommandHtml(ids, "Invoke-WebRequest -Uri " + archive_url + " -OutFile \"anyzig-"  + arch_os + ".zip\"; Expand-Archive -Path \"anyzig-" + arch_os + ".zip\" -DestinationPath \"anyzig\"");
           }
           html += "</div></section>";
       }
@@ -200,7 +199,6 @@ function copyToClipboard(text) {
   }
 
   function bodyOnload() {
-      get("VersionDiv").innerHTML = version;
       updateInstallDiv()
 
       let userAgent = window.navigator.userAgent;
@@ -216,7 +214,6 @@ function copyToClipboard(text) {
 </head><body onload="bodyOnload()">
 
 <h1>Install anyzig</h1>
-<div id="VersionDiv"></div>
 <div style="margin:10px">
   <span id="ButtonLinux" class="FilterButton" onclick="toggleOs(OS_LINUX)">Linux</span>
   <span id="ButtonMacos" class="FilterButton" onclick="toggleOs(OS_MACOS)">macOS</span>
