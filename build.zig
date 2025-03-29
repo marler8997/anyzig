@@ -42,7 +42,10 @@ pub fn build(b: *std.Build) !void {
         break :blk exe;
     };
 
-    {
+    const test_step = b.step("test", "");
+    addZigTests(b, anyzig, test_step, .{ .make_build_steps = true });
+
+    const anyzls = blk: {
         const exe = b.addExecutable(.{
             .name = "zls",
             .root_source_file = b.path("src/main.zig"),
@@ -61,10 +64,10 @@ pub fn build(b: *std.Build) !void {
             run.addArgs(args);
         }
         b.step("zls", "").dependOn(&run.step);
-    }
+        break :blk exe;
+    };
 
-    const test_step = b.step("test", "");
-    addTests(b, anyzig, test_step, .{ .make_build_steps = true });
+    addZlsTests(b, anyzls, anyzig, test_step, .{ .make_build_steps = true });
 
     const zip_dep = b.dependency("zip", .{});
 
@@ -91,7 +94,7 @@ const SharedTestOptions = struct {
     make_build_steps: bool,
     failing_to_execute_foreign_is_an_error: bool = true,
 };
-fn addTests(
+fn addZigTests(
     b: *std.Build,
     anyzig: *std.Build.Step.Compile,
     test_step: *std.Build.Step,
@@ -103,7 +106,7 @@ fn addTests(
         run.addArg(flag);
         run.addCheck(.{ .expect_stdout_match = "Usage: zig [command] [options]" });
         if (opt.make_build_steps) {
-            b.step(b.fmt("test{s}", .{flag}), "").dependOn(&run.step);
+            b.step(b.fmt("test-zig{s}", .{flag}), "").dependOn(&run.step);
         }
         test_step.dependOn(&run.step);
     }
@@ -225,7 +228,7 @@ fn addTests(
             run.addArtifactArg(anyzig);
             run.addArg("build");
             if (opt.make_build_steps) {
-                b.step(b.fmt("test-{s}-build", .{zig_version}), "").dependOn(&run.step);
+                b.step(b.fmt("test-zig-{s}-build", .{zig_version}), "").dependOn(&run.step);
             }
             test_step.dependOn(&run.step);
         }
@@ -243,7 +246,7 @@ fn addTests(
         run.addArg("version");
         //run.expectStdOutEqual("0.13.0\n");
         if (opt.make_build_steps) {
-            b.step("test-bad-hash", "").dependOn(&run.step);
+            b.step("test-zig-bad-hash", "").dependOn(&run.step);
         }
         test_step.dependOn(&run.step);
     }
@@ -268,7 +271,7 @@ fn addTests(
             run.addArg("version");
             run.expectStdOutEqual("0.13.0\n");
             if (opt.make_build_steps) {
-                b.step("test-zon-with-comment", "").dependOn(&run.step);
+                b.step("test-zig-zon-with-comment", "").dependOn(&run.step);
             }
             test_step.dependOn(&run.step);
         }
@@ -300,6 +303,143 @@ const ZigRelease = enum {
             else => |release| @tagName(release),
         };
     }
+};
+
+fn addZlsTests(
+    b: *std.Build,
+    anyzls: *std.Build.Step.Compile,
+    /// anyzig required to generate build configs.
+    anyzig: *std.Build.Step.Compile,
+    test_step: *std.Build.Step,
+    opt: SharedTestOptions,
+) void {
+    inline for (&.{ "-h", "--help" }) |flag| {
+        const run = b.addRunArtifact(anyzls);
+        run.setName(b.fmt("anyzls {s}", .{flag}));
+        run.addArg(flag);
+        run.addCheck(.{ .expect_stderr_match = "ZLS - A non-official language server for Zig" });
+        if (opt.make_build_steps) {
+            b.step(b.fmt("test-zls{s}", .{flag}), "").dependOn(&run.step);
+        }
+        test_step.dependOn(&run.step);
+    }
+
+    {
+        const run = b.addRunArtifact(anyzls);
+        run.setName("anyzls -no-command");
+        run.addArg("-no-command");
+        run.expectStdErrEqual("error: expected a command but got '-no-command'\n");
+        test_step.dependOn(&run.step);
+    }
+
+    {
+        const run = b.addRunArtifact(anyzls);
+        run.setName("anyzls with no build.zig file");
+        run.addArg("version");
+        // the most full-proof directory to avoid finding a build.zig...if
+        // this doesn't work, then no directory would work anyway
+        run.setCwd(.{ .cwd_relative = switch (builtin.os.tag) {
+            .windows => "C:/",
+            else => "/",
+        } });
+        run.addCheck(.{
+            .expect_stderr_match = "no build.zig to pull a zig version from, you can:",
+        });
+        test_step.dependOn(&run.step);
+    }
+
+    const wrap_exe = b.addExecutable(.{
+        .name = "wrap",
+        .root_source_file = b.path("test/wrap.zig"),
+        .target = b.graph.host,
+    });
+
+    inline for (std.meta.fields(ZlsSupportedZigRelease)) |field| {
+        var splits = std.mem.splitScalar(u8, field.name, '.');
+        const major = splits.next().?;
+        const minor = splits.next().?;
+        const zls_version = b.fmt("{s}.{s}.0", .{ major, minor });
+        const zig_release: ZigRelease = @field(ZigRelease, field.name);
+
+        switch (builtin.os.tag) {
+            .linux => switch (builtin.cpu.arch) {
+                .x86_64 => switch (comptime zig_release) {
+                    // fails to get dynamic linker on NixOS
+                    .@"0.9.0",
+                    .@"0.9.1",
+                    => continue,
+                    else => {},
+                },
+                else => {},
+            },
+            else => {},
+        }
+
+        const init_out = blk: {
+            const init = b.addRunArtifact(wrap_exe);
+            init.setName(b.fmt("zig {s} build init", .{zls_version}));
+            init.addArg("--no-input");
+            const out = init.addOutputDirectoryArg("out");
+            init.addArg("nosetup");
+            init.addArtifactArg(anyzig);
+            init.addArg(zls_version);
+            init.addArg(switch (zig_release.getInitKind()) {
+                .simple => "init",
+                .exe_and_lib => "init-exe",
+            });
+            break :blk out;
+        };
+
+        {
+            const run = b.addRunArtifact(wrap_exe);
+            run.setName(b.fmt("zls {s} --version", .{zls_version}));
+            run.addDirectoryArg(init_out);
+            _ = run.addOutputDirectoryArg("out");
+            run.addArg("nosetup");
+            run.addArtifactArg(anyzls);
+            run.addArg("--version");
+            run.addCheck(.{ .expect_stdout_match = zls_version });
+            test_step.dependOn(&run.step);
+        }
+    }
+
+    {
+        const write_files = b.addWriteFiles();
+        _ = write_files.add("build.zig", "");
+        _ = write_files.add("build.zig.zon",
+            \\// example comment
+            \\.{
+            \\    .minimum_zig_version = "0.13.0",
+            \\}
+            \\
+        );
+        {
+            const run = b.addRunArtifact(wrap_exe);
+            run.setName(b.fmt("zls zon with comment", .{}));
+            run.addDirectoryArg(write_files.getDirectory());
+            _ = run.addOutputDirectoryArg("out");
+            run.addArg("nosetup");
+            run.addArtifactArg(anyzls);
+            run.addArg("--version");
+            run.expectStdOutEqual("0.13.0\n");
+            if (opt.make_build_steps) {
+                b.step("test-zls-zon-with-comment", "").dependOn(&run.step);
+            }
+            test_step.dependOn(&run.step);
+        }
+    }
+}
+
+const ZlsSupportedZigRelease = enum {
+    @"0.9.0",
+    @"0.9.1",
+    @"0.10.0",
+    @"0.10.1",
+    @"0.11.0",
+    @"0.12.0",
+    @"0.12.1",
+    @"0.13.0",
+    @"0.14.0",
 };
 
 fn ci(
@@ -361,12 +501,14 @@ fn ci(
         );
 
         const target_test_step = b.step(b.fmt("test-{s}", .{ci_target_str}), "");
-        addTests(b, zig_exe, target_test_step, .{
+        const options = SharedTestOptions{
             .make_build_steps = false,
             // This doesn't seem to be working, so we're only adding these tests
             // as a dependency if we see the arch is compatible beforehand
             .failing_to_execute_foreign_is_an_error = false,
-        });
+        };
+        addZigTests(b, zig_exe, target_test_step, options);
+        addZlsTests(b, zls_exe, zig_exe, target_test_step, options);
         const os_compatible = (builtin.os.tag == target.result.os.tag);
         const arch_compatible = (builtin.cpu.arch == target.result.cpu.arch);
         if (os_compatible and arch_compatible) {
