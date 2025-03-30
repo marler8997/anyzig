@@ -209,9 +209,13 @@ pub fn main() !void {
 
     const maybe_command: ?[]const u8 = if (argv_index >= all_args.len) null else all_args[argv_index];
 
-    const version: []const u8, const is_init = blk: {
+    var version: []const u8, const is_init = blk: {
         if (maybe_command) |command| {
-            if (std.mem.startsWith(u8, command, "-") and !std.mem.eql(u8, command, "-h") and !std.mem.eql(u8, command, "--help")) {
+            if (std.mem.startsWith(u8, command, "-") and
+                !std.mem.eql(u8, command, "-h") and
+                !std.mem.eql(u8, command, "--help") and
+                !std.mem.eql(u8, command, "--version"))
+            {
                 try std.io.getStdErr().writer().print(
                     "error: expected a command but got '{s}'\n",
                     .{command},
@@ -238,6 +242,13 @@ pub fn main() !void {
         };
         break :blk .{ try determineZigVersion(arena, build_root), false };
     };
+
+    if (build_options.exe == .zls) {
+        var splits = std.mem.splitScalar(u8, version, '.');
+        const major = splits.next().?;
+        const minor = splits.next().?;
+        version = try std.fmt.allocPrint(arena, "{s}.{s}.0", .{ major, minor });
+    }
 
     const app_data_path = try std.fs.getAppDataDir(arena, "anyzig");
     defer arena.free(app_data_path);
