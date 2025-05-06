@@ -35,8 +35,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: mlugg/setup-zig@v1
-        with:
-          version: 0.14.0
       - run: |
           zig build ci --summary all
       - if: ${{ matrix.os == 'ubuntu-latest' && matrix.arch == 'x86_64' }}
