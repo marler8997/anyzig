@@ -263,7 +263,6 @@ pub fn main() !void {
                 std.process.exit(0xff);
             }
             if (std.mem.eql(u8, command, "available")) {
-                std.log.info("Finding available releases...", .{});
                 try showAvailableReleases(arena);
                 std.process.exit(0);
             }
@@ -603,6 +602,8 @@ fn showAvailableReleases(arena: Allocator) !void {
     const index_path = try std.fs.path.join(arena, &.{ app_data_path, download_index_kind.basename() });
     defer arena.free(index_path);
 
+    log.info("Finding available releases...", .{});
+
     downloadFile(arena, download_index_kind.url(), index_path) catch |err| {
         log.err("Failed to download release index: {s}", .{@errorName(err)});
         return error.DownloadFailed;
@@ -634,8 +635,10 @@ fn showAvailableReleases(arena: Allocator) !void {
         return;
     }
 
-    std.log.info("Available Zig releases for {s}-{s}:", .{ os, arch });
-    std.log.info("----------------------------------------", .{});
+    // using this avoids the "anyzig: " prefix for formatting
+    io.getStdOut().writer().print("\n", .{}) catch {};
+    log.info("Available Zig releases for {s}-{s}:", .{ os, arch });
+    log.info("----------------------------------------", .{});
 
     if (versions.get("master")) |master_obj| {
         if (master_obj.object.get("version")) |version_val| {
