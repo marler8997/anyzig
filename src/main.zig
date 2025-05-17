@@ -635,6 +635,10 @@ fn showAvailableReleases(arena: Allocator) !void {
         return;
     }
 
+    // Initialize hashstore
+    const hashstore_path = try std.fs.path.join(arena, &.{ app_data_path, "hashstore" });
+    try hashstore.init(hashstore_path);
+
     // using this avoids the "anyzig: " prefix for formatting
     io.getStdOut().writer().print("\n", .{}) catch {};
     log.info("Available Zig releases for {s}-{s}:", .{ os, arch });
@@ -642,7 +646,12 @@ fn showAvailableReleases(arena: Allocator) !void {
 
     if (versions.get("master")) |master_obj| {
         if (master_obj.object.get("version")) |version_val| {
-            std.log.info("master ({s})", .{version_val.string});
+            const version_name = std.fmt.allocPrint(arena, "{s}-{s}", .{ exe_str, version_val.string }) catch |e| oom(e);
+            const is_installed = hashstore.find(hashstore_path, version_name) catch |err| {
+                log.warn("Failed to check if master is installed: {s}", .{@errorName(err)});
+                return;
+            } != null;
+            std.log.info("master ({s}){s}", .{ version_val.string, if (is_installed) " (installed)" else "" });
         } else {
             log.warn("Master version found but no version string", .{});
         }
@@ -657,7 +666,12 @@ fn showAvailableReleases(arena: Allocator) !void {
         const version_obj = entry.value_ptr.*.object;
         if (version_obj.get(json_arch_os)) |arch_os_obj| {
             if (arch_os_obj.object.get("tarball")) |_| {
-                std.log.info("{s}", .{version_str});
+                const version_name = std.fmt.allocPrint(arena, "{s}-{s}", .{ exe_str, version_str }) catch |e| oom(e);
+                const is_installed = hashstore.find(hashstore_path, version_name) catch |err| {
+                    log.warn("Failed to check if version {s} is installed: {s}", .{ version_str, @errorName(err) });
+                    return;
+                } != null;
+                std.log.info("{s}{s}", .{ version_str, if (is_installed) " (installed)" else "" });
                 found_any = true;
             }
         }
