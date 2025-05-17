@@ -587,6 +587,14 @@ const DownloadUrl = struct {
     }
 };
 
+const ShowReleasesError = error{
+    DownloadFailed,
+    FileOpenFailed,
+    FileReadFailed,
+    JsonParseFailed,
+    OutOfMemory,
+};
+
 fn showAvailableReleases(arena: Allocator) !void {
     const app_data_path = try std.fs.getAppDataDir(arena, "anyzig");
     defer arena.free(app_data_path);
@@ -595,32 +603,50 @@ fn showAvailableReleases(arena: Allocator) !void {
     const index_path = try std.fs.path.join(arena, &.{ app_data_path, download_index_kind.basename() });
     defer arena.free(index_path);
 
-    try downloadFile(arena, download_index_kind.url(), index_path);
+    downloadFile(arena, download_index_kind.url(), index_path) catch |err| {
+        log.err("Failed to download release index: {s}", .{@errorName(err)});
+        return error.DownloadFailed;
+    };
 
-    // Read the index file
-    const file = try std.fs.cwd().openFile(index_path, .{});
+    const file = std.fs.cwd().openFile(index_path, .{}) catch |err| {
+        log.err("Failed to open index file: {s}", .{@errorName(err)});
+        return error.FileOpenFailed;
+    };
     defer file.close();
-    const index_content = try file.readToEndAlloc(arena, std.math.maxInt(usize));
+
+    const index_content = file.readToEndAlloc(arena, std.math.maxInt(usize)) catch |err| {
+        log.err("Failed to read index file: {s}", .{@errorName(err)});
+        return error.FileReadFailed;
+    };
     defer arena.free(index_content);
 
-    // Parse the JSON
-    const root = try std.json.parseFromSlice(std.json.Value, arena, index_content, .{
+    const root = std.json.parseFromSlice(std.json.Value, arena, index_content, .{
         .allocate = .alloc_if_needed,
-    });
+    }) catch |err| {
+        log.err("Failed to parse index JSON: {s}", .{@errorName(err)});
+        return error.JsonParseFailed;
+    };
     defer root.deinit();
 
-    // Get all version objects
     const versions = root.value.object;
+    if (versions.count() == 0) {
+        log.warn("No versions found in index", .{});
+        return;
+    }
 
-    // First show master version if available
+    std.log.info("Available Zig releases for {s}-{s}:", .{ os, arch });
+    std.log.info("----------------------------------------", .{});
+
     if (versions.get("master")) |master_obj| {
         if (master_obj.object.get("version")) |version_val| {
             std.log.info("master ({s})", .{version_val.string});
+        } else {
+            log.warn("Master version found but no version string", .{});
         }
     }
 
-    // Then show all other versions
     var it = versions.iterator();
+    var found_any = false;
     while (it.next()) |entry| {
         const version_str = entry.key_ptr.*;
         if (std.mem.eql(u8, version_str, "master")) continue;
@@ -629,8 +655,13 @@ fn showAvailableReleases(arena: Allocator) !void {
         if (version_obj.get(json_arch_os)) |arch_os_obj| {
             if (arch_os_obj.object.get("tarball")) |_| {
                 std.log.info("{s}", .{version_str});
+                found_any = true;
             }
         }
+    }
+
+    if (!found_any) {
+        log.warn("No releases found for {s}-{s}", .{ os, arch });
     }
 }
 
