@@ -586,14 +586,6 @@ const DownloadUrl = struct {
     }
 };
 
-const ShowReleasesError = error{
-    DownloadFailed,
-    FileOpenFailed,
-    FileReadFailed,
-    JsonParseFailed,
-    OutOfMemory,
-};
-
 fn showAvailableReleases(arena: Allocator) !void {
     const app_data_path = try std.fs.getAppDataDir(arena, "anyzig");
     defer arena.free(app_data_path);
