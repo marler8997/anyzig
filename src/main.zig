@@ -262,13 +262,18 @@ pub fn main() !void {
                 );
                 std.process.exit(0xff);
             }
+            if (std.mem.eql(u8, command, "available")) {
+                try showAvailableReleases(arena);
+                std.process.exit(0);
+            }
         }
         if (manual_version) |version| break :blk .{ version, false };
         const build_root = try findBuildRoot(arena, build_root_options) orelse {
             try std.io.getStdErr().writeAll(
                 "no build.zig to pull a zig version from, you can:\n" ++
                     "  1. run '" ++ exe_str ++ " VERSION' to specify a version\n" ++
-                    "  2. run from a directory where a build.zig can be found\n",
+                    "  2. run '" ++ exe_str ++ " AVAILABLE' to see all available downloads\n" ++
+                    "  3. run from a directory where a build.zig can be found\n",
             );
             std.process.exit(0xff);
         };
@@ -580,6 +585,93 @@ const DownloadUrl = struct {
         }
     }
 };
+
+fn showAvailableReleases(arena: Allocator) !void {
+    const app_data_path = try std.fs.getAppDataDir(arena, "anyzig");
+    defer arena.free(app_data_path);
+
+    const download_index_kind: DownloadIndexKind = .official;
+    const index_path = try std.fs.path.join(arena, &.{ app_data_path, download_index_kind.basename() });
+    defer arena.free(index_path);
+
+    log.info("Finding available releases...", .{});
+
+    downloadFile(arena, download_index_kind.url(), index_path) catch |err| {
+        log.err("Failed to download release index: {s}", .{@errorName(err)});
+        return error.DownloadFailed;
+    };
+
+    const file = std.fs.cwd().openFile(index_path, .{}) catch |err| {
+        log.err("Failed to open index file: {s}", .{@errorName(err)});
+        return error.FileOpenFailed;
+    };
+    defer file.close();
+
+    const index_content = file.readToEndAlloc(arena, std.math.maxInt(usize)) catch |err| {
+        log.err("Failed to read index file: {s}", .{@errorName(err)});
+        return error.FileReadFailed;
+    };
+    defer arena.free(index_content);
+
+    const root = std.json.parseFromSlice(std.json.Value, arena, index_content, .{
+        .allocate = .alloc_if_needed,
+    }) catch |err| {
+        log.err("Failed to parse index JSON: {s}", .{@errorName(err)});
+        return error.JsonParseFailed;
+    };
+    defer root.deinit();
+
+    const versions = root.value.object;
+    if (versions.count() == 0) {
+        log.warn("No versions found in index", .{});
+        return;
+    }
+
+    const hashstore_path = try std.fs.path.join(arena, &.{ app_data_path, "hashstore" });
+    try hashstore.init(hashstore_path);
+
+    // using io rather than log avoids the "anyzig: " prefix for formatting
+    io.getStdOut().writer().print("\n", .{}) catch {};
+    log.info("Available Zig releases for {s}-{s}:", .{ os, arch });
+    log.info("----------------------------------------", .{});
+
+    if (versions.get("master")) |master_obj| {
+        if (master_obj.object.get("version")) |version_val| {
+            const version_name = std.fmt.allocPrint(arena, "{s}-{s}", .{ exe_str, version_val.string }) catch |e| oom(e);
+            const is_installed = hashstore.find(hashstore_path, version_name) catch |err| {
+                log.warn("Failed to check if master is installed: {s}", .{@errorName(err)});
+                return;
+            } != null;
+            std.log.info("master ({s}){s}", .{ version_val.string, if (is_installed) " (installed)" else "" });
+        } else {
+            log.warn("Master version found but no version string", .{});
+        }
+    }
+
+    var it = versions.iterator();
+    var found_any = false;
+    while (it.next()) |entry| {
+        const version_str = entry.key_ptr.*;
+        if (std.mem.eql(u8, version_str, "master")) continue;
+
+        const version_obj = entry.value_ptr.*.object;
+        if (version_obj.get(json_arch_os)) |arch_os_obj| {
+            if (arch_os_obj.object.get("tarball")) |_| {
+                const version_name = std.fmt.allocPrint(arena, "{s}-{s}", .{ exe_str, version_str }) catch |e| oom(e);
+                const is_installed = hashstore.find(hashstore_path, version_name) catch |err| {
+                    log.warn("Failed to check if version {s} is installed: {s}", .{ version_str, @errorName(err) });
+                    return;
+                } != null;
+                std.log.info("{s}{s}", .{ version_str, if (is_installed) " (installed)" else "" });
+                found_any = true;
+            }
+        }
+    }
+
+    if (!found_any) {
+        log.warn("No releases found for {s}-{s}", .{ os, arch });
+    }
+}
 
 fn makeOfficialUrl(arena: Allocator, semantic_version: SemanticVersion) DownloadUrl {
     return switch (determineVersionKind(semantic_version)) {
