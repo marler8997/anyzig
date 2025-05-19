@@ -3,6 +3,7 @@ pub const LockFile = @This();
 
 const builtin = @import("builtin");
 const std = @import("std");
+const Reporting = @import("reporting.zig");
 
 path: []const u8,
 file: std.fs.File,
@@ -25,7 +26,7 @@ pub fn lock(path: []const u8) !LockFile {
         .windows => std.os.windows.GetCurrentProcessId(),
         .linux => std.os.linux.getpid(),
         .macos => std.c.getpid(),
-        else => @compileError("todo"),
+        else => Reporting.throwError("LockFile: unsupported OS", .{}),
     };
     var pid_buffer: [40]u8 = undefined;
     const pid_text = try std.fmt.bufPrint(&pid_buffer, "{d}", .{pid});
@@ -43,6 +44,6 @@ pub fn unlock(self: *LockFile) void {
     self.file.close();
     std.fs.cwd().deleteFile(self.path) catch |err| switch (err) {
         error.FileNotFound => {},
-        else => |e| std.debug.panic("failed to delete lock file '{s}' with {s}", .{ self.path, @errorName(e) }),
+        else => |e| Reporting.panic("failed to delete lock file '{s}' with {s}", .{ self.path, @errorName(e) }),
     };
 }

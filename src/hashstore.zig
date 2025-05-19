@@ -1,7 +1,7 @@
 const std = @import("std");
 const zig = @import("zig");
 const LockFile = @import("LockFile.zig");
-const anyzig = @import("root");
+const Reporting = @import("reporting.zig");
 
 pub fn init(path: []const u8) !void {
     std.fs.cwd().makePath(path) catch |err| switch (err) {
@@ -51,7 +51,7 @@ pub fn find(hashstore_path: []const u8, name: []const u8) !?zig.Package.Hash {
     defer arena.free(full_content);
     const hash_bytes = std.mem.trim(u8, full_content, &std.ascii.whitespace);
     if (hash_bytes.len > zig.Package.Hash.max_len) {
-        anyzig.log.warn(
+        Reporting.criticalWarn(
             "{s}: file is too big (max is {})",
             .{ lock.hashfile_path, zig.Package.Hash.max_len },
         );
