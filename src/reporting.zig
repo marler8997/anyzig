@@ -15,19 +15,19 @@ pub const Reporter = struct {
 
     pub fn info(self: *const Reporter, comptime format: []const u8, args: anytype) void {
         if (self.verbose_enabled) {
-            logWithPrefix("anyzig.info: ", format, args, "info message");
+            logOutWithPrefix("anyzig.info: ", format, args);
         }
     }
 
     pub fn debug(self: *const Reporter, comptime format: []const u8, args: anytype) void {
         if (self.debug_enabled) {
-            logWithPrefix("anyzig.debug: ", format, args, "debug message");
+            logOutWithPrefix("anyzig.debug: ", format, args);
         }
     }
 
     pub fn warn(self: *const Reporter, comptime format: []const u8, args: anytype) void {
         if (self.verbose_enabled or self.debug_enabled) {
-            logWithPrefix("anyzig.warn: ", format, args, "warn message");
+            logErrWithPrefix("anyzig.warn: ", format, args);
         }
     }
 };
@@ -35,7 +35,7 @@ pub const Reporter = struct {
 // the most basic logging function, no prefix
 //useful for printing menus and formatting
 pub fn log(comptime format: []const u8, args: anytype) void {
-    logWithPrefix("", format, args, "log");
+    logOutWithPrefix("", format, args);
 }
 
 // throw error will exit the program with a default exit code
@@ -45,7 +45,7 @@ pub fn throwError(comptime format: []const u8, args: anytype) void {
 }
 
 pub fn throwErrorWithExitCode(comptime format: []const u8, args: anytype, exit_code: u8) void {
-    logWithPrefix("anyzig.error: ", format, args, "error message");
+    logErrWithPrefix("anyzig.error: ", format, args);
     std.process.exit(exit_code);
 }
 
@@ -56,35 +56,43 @@ pub fn panic(comptime format: []const u8, args: anytype) void {
 
 // used when a warning should be shown regardless of verbosity
 pub fn criticalWarn(comptime format: []const u8, args: anytype) void {
-    logWithPrefix("anyzig.critical: ", format, args, "critical warn message");
+    logErrWithPrefix("anyzig.critical: ", format, args);
 }
 
 // Writer methods below, internal use only
-fn writeLogMessage(
+fn write(
     writer: anytype,
     comptime prefix: []const u8,
     comptime format: []const u8,
     args: anytype,
-    comptime error_prefix: []const u8,
+    comptime stream: []const u8,
 ) void {
     nosuspend {
         writer.print(prefix ++ format ++ "\n", args) catch |e| {
-            std.debug.print("Failed to write {s}: {}\n", .{ error_prefix, e });
+            std.debug.print("Failed to write {s}: {}\n", .{ stream, e });
             return;
         };
         writer.context.flush() catch |e| {
-            std.debug.print("Failed to flush {s} buffer: {}\n", .{ error_prefix, e });
+            std.debug.print("Failed to flush {s} buffer: {}\n", .{ stream, e });
             return;
         };
     }
 }
 
-fn logWithPrefix(comptime actual_prefix: []const u8, comptime format: []const u8, args: anytype, comptime meta_error_ctx: []const u8) void {
+fn logOutWithPrefix(comptime actual_prefix: []const u8, comptime format: []const u8, args: anytype) void {
+    const writer = std.io.getStdOut().writer();
+    var bw = std.io.bufferedWriter(writer);
+    const buffered_writer = bw.writer();
+
+    write(buffered_writer, actual_prefix, format, args, "stdout");
+}
+
+fn logErrWithPrefix(comptime actual_prefix: []const u8, comptime format: []const u8, args: anytype) void {
     const stderr = std.io.getStdErr().writer();
     var bw = std.io.bufferedWriter(stderr);
     const writer = bw.writer();
 
     std.debug.lockStdErr();
     defer std.debug.unlockStdErr();
-    writeLogMessage(writer, actual_prefix, format, args, meta_error_ctx);
+    write(writer, actual_prefix, format, args, "stderr");
 }
