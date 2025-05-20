@@ -112,7 +112,7 @@ fn addTests(
         const run = b.addRunArtifact(anyzig);
         run.setName("anyzig -no-command");
         run.addArg("-no-command");
-        run.expectStdErrEqual("error: expected a command but got '-no-command'\n");
+        run.expectStdErrEqual("anyzig.error: invalid command: '-no-command'\n");
         test_step.dependOn(&run.step);
     }
 
@@ -120,7 +120,7 @@ fn addTests(
         const run = b.addRunArtifact(anyzig);
         run.setName("anyzig init (no version)");
         run.addArg("init");
-        run.expectStdErrEqual("error: anyzig init requires a version, i.e. 'zig 0.13.0 init'\n");
+        run.expectStdErrEqual("anyzig.error: anyzig init requires a version, i.e. 'zig 0.13.0 init'\n");
         test_step.dependOn(&run.step);
     }
 
@@ -135,7 +135,7 @@ fn addTests(
             else => "/",
         } });
         run.addCheck(.{
-            .expect_stderr_match = "no build.zig to pull a zig version from, you can:",
+            .expect_stderr_match = "anyzig.error: no build.zig to pull a zig version from",
         });
         test_step.dependOn(&run.step);
     }
