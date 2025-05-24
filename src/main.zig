@@ -1122,10 +1122,11 @@ fn findBuildRoot(arena: Allocator, options: FindBuildRootOptions) !?BuildRoot {
     while (true) {
         const joined_path = try fs.path.join(arena, &[_][]const u8{ dirname, build_zig_basename });
         if (fs.cwd().access(joined_path, .{})) |_| {
-            const dir = fs.cwd().openDir(dirname, .{}) catch |err| {
+            const dir = fs.cwd().openDir(dirname, .{ .iterate = true }) catch |err| {
                 errExit("unable to open directory while searching for build.zig file, '{s}': {s}", .{ dirname, @errorName(err) });
             };
-            return .{
+
+            if (try caseMatches(dir, build_zig_basename)) return .{
                 .build_zig_basename = build_zig_basename,
                 .directory = .{
                     .path = dirname,
@@ -1134,13 +1135,23 @@ fn findBuildRoot(arena: Allocator, options: FindBuildRootOptions) !?BuildRoot {
                 .cleanup_build_dir = dir,
             };
         } else |err| switch (err) {
-            error.FileNotFound => {
-                dirname = fs.path.dirname(dirname) orelse return null;
-                continue;
-            },
+            error.FileNotFound => {},
             else => |e| return e,
         }
+        dirname = fs.path.dirname(dirname) orelse return null;
     }
+}
+
+fn caseMatches(iterable_dir: std.fs.Dir, name: []const u8) !bool {
+    // TODO: maybe there is more efficient platform-specific mechanisms to implement this?
+    var iterator = iterable_dir.iterate();
+    var found_case_insensitive_match = false;
+    while (try iterator.next()) |entry| {
+        if (std.mem.eql(u8, entry.name, name)) return true;
+        found_case_insensitive_match = found_case_insensitive_match or std.ascii.eqlIgnoreCase(entry.name, name);
+    }
+    if (!found_case_insensitive_match) return error.FileNotFound;
+    return false;
 }
 
 fn errExit(comptime format: []const u8, args: anytype) noreturn {
