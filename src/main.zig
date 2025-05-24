@@ -333,7 +333,7 @@ pub fn main() !void {
             }
         }
 
-        const url = try getVersionUrl(arena, app_data_path, semantic_version, json_arch_os);
+        const url = try getVersionUrl(arena, app_data_path, semantic_version);
         defer url.deinit(arena);
         const hash = hashAndPath(try cmdFetch(
             gpa,
@@ -499,7 +499,7 @@ const SemanticVersion = struct {
         };
     }
     pub fn eql(self: SemanticVersion, other: SemanticVersion) bool {
-        return self.major == other.major and self.minor == other.minor and self.patch == other.patch;
+        return self.ref().order(other.ref()) == .eq;
     }
     pub fn format(
         self: SemanticVersion,
@@ -539,13 +539,17 @@ const os = switch (builtin.os.tag) {
     else => @compileError("Unsupported OS"),
 };
 
-const url_platform = os ++ "-" ++ arch;
-const json_arch_os = arch ++ "-" ++ os;
+const os_arch = os ++ "-" ++ arch;
+const arch_os = arch ++ "-" ++ os;
 const archive_ext = if (builtin.os.tag == .windows) "zip" else "tar.xz";
 
-const VersionKind = enum { release, dev };
-fn determineVersionKind(semantic_version: SemanticVersion) VersionKind {
-    return if (semantic_version.pre == null and semantic_version.build == null) .release else .dev;
+const VersionKind = union(enum) { release: Release, dev };
+fn determineVersionKind(v: SemanticVersion) VersionKind {
+    return if (v.pre == null and v.build == null) .{ .release = .{
+        .major = v.major,
+        .minor = v.minor,
+        .patch = v.patch,
+    } } else .dev;
 }
 
 const DownloadIndexKind = enum {
@@ -581,17 +585,37 @@ const DownloadUrl = struct {
     }
 };
 
+const Release = struct {
+    major: usize,
+    minor: usize,
+    patch: usize,
+    pub fn order(a: Release, b: Release) std.math.Order {
+        if (a.major != b.major) return std.math.order(a.major, b.major);
+        if (a.minor != b.minor) return std.math.order(a.minor, b.minor);
+        return std.math.order(a.patch, b.patch);
+    }
+};
+
+// The Zig release where the OS-ARCH in the url was swapped to ARCH-OS
+const arch_os_swap_release: Release = .{ .major = 0, .minor = 14, .patch = 1 };
+
 fn makeOfficialUrl(arena: Allocator, semantic_version: SemanticVersion) DownloadUrl {
     return switch (determineVersionKind(semantic_version)) {
         .dev => DownloadUrl.initOfficial(std.fmt.allocPrint(
             arena,
-            "https://ziglang.org/builds/zig-" ++ url_platform ++ "-{0}." ++ archive_ext,
+            "https://ziglang.org/builds/zig-" ++ arch_os ++ "-{0}." ++ archive_ext,
             .{semantic_version},
         ) catch |e| oom(e)),
-        .release => DownloadUrl.initOfficial(std.fmt.allocPrint(
+        .release => |release| DownloadUrl.initOfficial(std.fmt.allocPrint(
             arena,
-            "https://ziglang.org/download/{0}/zig-" ++ url_platform ++ "-{0}." ++ archive_ext,
-            .{semantic_version},
+            "https://ziglang.org/download/{0}/zig-{1s}-{0}." ++ archive_ext,
+            .{
+                semantic_version,
+                switch (release.order(arch_os_swap_release)) {
+                    .lt => os_arch,
+                    .gt, .eq => arch_os,
+                },
+            },
         ) catch |e| oom(e)),
     };
 }
@@ -600,12 +624,11 @@ fn getVersionUrl(
     arena: Allocator,
     app_data_path: []const u8,
     semantic_version: SemanticVersion,
-    arch_os: []const u8,
 ) !DownloadUrl {
     if (build_options.exe == .zls) return DownloadUrl.initOfficial(std.fmt.allocPrint(
         arena,
         "https://builds.zigtools.org/zls-{s}-{}.{s}",
-        .{ url_platform, semantic_version, archive_ext },
+        .{ os_arch, semantic_version, archive_ext },
     ) catch |e| oom(e));
 
     if (!isMachVersion(semantic_version)) return makeOfficialUrl(arena, semantic_version);
@@ -624,7 +647,7 @@ fn getVersionUrl(
             break :blk try file.readToEndAlloc(arena, std.math.maxInt(usize));
         };
         defer arena.free(index_content);
-        if (extractUrlFromMachDownloadIndex(arena, semantic_version, arch_os, index_path, index_content)) |url|
+        if (extractUrlFromMachDownloadIndex(arena, semantic_version, index_path, index_content)) |url|
             return url;
     }
 
@@ -636,7 +659,7 @@ fn getVersionUrl(
         break :blk try file.readToEndAlloc(arena, std.math.maxInt(usize));
     };
     defer arena.free(index_content);
-    return extractUrlFromMachDownloadIndex(arena, semantic_version, arch_os, index_path, index_content) orelse {
+    return extractUrlFromMachDownloadIndex(arena, semantic_version, index_path, index_content) orelse {
         errExit("compiler version '{}' is missing from download index {s}", .{ semantic_version, index_path });
     };
 }
@@ -669,7 +692,6 @@ fn extractMasterVersion(
 fn extractUrlFromMachDownloadIndex(
     allocator: std.mem.Allocator,
     semantic_version: SemanticVersion,
-    arch_os: []const u8,
     index_filepath: []const u8,
     download_index: []const u8,
 ) ?DownloadUrl {

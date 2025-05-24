@@ -34,7 +34,7 @@ jobs:
     runs-on: ${{matrix.os}}
     steps:
       - uses: actions/checkout@v4
-      - uses: mlugg/setup-zig@v1
+      - uses: mlugg/setup-zig@v2
       - run: |
           zig build ci --summary all
       - if: ${{ matrix.os == 'ubuntu-latest' && matrix.arch == 'x86_64' }}
