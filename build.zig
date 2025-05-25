@@ -533,6 +533,7 @@ fn ci(
         "arm-linux",
         "powerpc64le-linux",
         "riscv64-linux",
+        "s390x-linux",
         "x86-linux",
         "x86-windows",
         "x86_64-linux",
