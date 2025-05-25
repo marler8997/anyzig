@@ -32,6 +32,69 @@ pub const std_options: std.Options = .{
 
 const exe_str = @tagName(build_options.exe);
 
+const Verbosity = enum {
+    debug,
+    warn,
+    pub const default: Verbosity = .debug;
+};
+
+const global = struct {
+    var gpa_instance: std.heap.GeneralPurposeAllocator(.{}) = .{};
+    const gpa = gpa_instance.allocator();
+    var arena_instance = std.heap.ArenaAllocator.init(gpa);
+    const arena = arena_instance.allocator();
+
+    var cached_verbosity: ?Verbosity = null;
+    var cached_app_data_dir: ?union(enum) {
+        ok: []const u8,
+        err: anyerror,
+    } = null;
+
+    fn getAppDataDir() ![]const u8 {
+        if (cached_app_data_dir == null) {
+            cached_app_data_dir = if (std.fs.getAppDataDir(arena, "anyzig")) |dir|
+                .{ .ok = dir }
+            else |e|
+                .{ .err = e };
+        }
+        return switch (cached_app_data_dir.?) {
+            .ok => |d| d,
+            .err => |e| e,
+        };
+    }
+};
+
+fn readVerbosityFile() union(enum) {
+    no_app_data_dir,
+    no_file,
+    loaded_from_file: Verbosity,
+} {
+    const app_data_dir = global.getAppDataDir() catch return .no_app_data_dir;
+    const verbosity_path = std.fs.path.join(global.arena, &.{ app_data_dir, "verbosity" }) catch |e| oom(e);
+    defer global.arena.free(verbosity_path);
+    const content = read_file: {
+        const file = std.fs.cwd().openFile(verbosity_path, .{}) catch |err| switch (err) {
+            error.FileNotFound => return .no_file,
+            else => |e| std.debug.panic("open '{s}' failed with {s}", .{ verbosity_path, @errorName(e) }),
+        };
+        defer file.close();
+        break :read_file file.readToEndAlloc(global.arena, std.math.maxInt(usize)) catch |err| std.debug.panic(
+            "read '{s}' failed with {s}",
+            .{ verbosity_path, @errorName(err) },
+        );
+    };
+    defer global.arena.free(content);
+    const content_trimmed = std.mem.trimRight(u8, content, &std.ascii.whitespace);
+    if (std.mem.eql(u8, content_trimmed, "debug")) return .{ .loaded_from_file = .debug };
+    if (std.mem.eql(u8, content_trimmed, "warn")) return .{ .loaded_from_file = .warn };
+    std.debug.panic(
+        "file '{s}' had the following unexpected content:\n" ++
+            "---\n{s}\n---\n" ++
+            "we currently only expect the content to be 'debug' or 'warn'",
+        .{ verbosity_path, content },
+    );
+}
+
 fn anyzigLog(
     comptime level: std.log.Level,
     comptime scope: @Type(.enum_literal),
@@ -45,6 +108,25 @@ fn anyzigLog(
         },
         else => |s| "(" ++ @tagName(s) ++ "): " ++ level.asText(),
     });
+
+    check_verbosity: {
+        switch (level) {
+            .err, .warn => break :check_verbosity,
+            .info, .debug => {},
+        }
+        if (global.cached_verbosity == null) {
+            global.cached_verbosity = switch (readVerbosityFile()) {
+                .no_app_data_dir => .debug,
+                .no_file => .default,
+                .loaded_from_file => |v| v,
+            };
+        }
+        switch (global.cached_verbosity.?) {
+            .debug => {},
+            .warn => return,
+        }
+    }
+
     const stderr = std.io.getStdErr().writer();
     var bw = std.io.bufferedWriter(stderr);
     const writer = bw.writer();
@@ -201,13 +283,11 @@ fn determineSemanticVersion(scratch: Allocator, build_root: BuildRoot) !Semantic
 }
 
 pub fn main() !void {
-    var gpa_instance: std.heap.GeneralPurposeAllocator(.{}) = .{};
-    defer _ = gpa_instance.deinit();
-    const gpa = gpa_instance.allocator();
+    defer _ = global.gpa_instance.deinit();
+    const gpa = global.gpa;
 
-    var arena_instance = std.heap.ArenaAllocator.init(gpa);
-    defer arena_instance.deinit();
-    const arena = arena_instance.allocator();
+    defer global.arena_instance.deinit();
+    const arena = global.arena;
 
     const all_args = try std.process.argsAlloc(arena);
     defer arena.free(all_args);
@@ -262,9 +342,11 @@ pub fn main() !void {
                 );
                 std.process.exit(0xff);
             }
-            if (std.mem.eql(u8, command, "available")) {
-                try showAvailableReleases(arena);
-                std.process.exit(0);
+            if (std.mem.eql(u8, command, "any")) {
+                if (argv_index + 1 == all_args.len) {
+                    std.process.exit(try anyCommandUsage());
+                }
+                std.process.exit(try anyCommand(all_args[argv_index + 1], all_args[argv_index + 2 ..]));
             }
         }
         if (manual_version) |version| break :blk .{ version, false };
@@ -272,8 +354,7 @@ pub fn main() !void {
             try std.io.getStdErr().writeAll(
                 "no build.zig to pull a zig version from, you can:\n" ++
                     "  1. run '" ++ exe_str ++ " VERSION' to specify a version\n" ++
-                    "  2. run '" ++ exe_str ++ " AVAILABLE' to see all available downloads\n" ++
-                    "  3. run from a directory where a build.zig can be found\n",
+                    "  2. run from a directory where a build.zig can be found\n",
             );
             std.process.exit(0xff);
         };
@@ -338,7 +419,7 @@ pub fn main() !void {
             }
         }
 
-        const url = try getVersionUrl(arena, app_data_path, semantic_version, json_arch_os);
+        const url = try getVersionUrl(arena, app_data_path, semantic_version);
         defer url.deinit(arena);
         const hash = hashAndPath(try cmdFetch(
             gpa,
@@ -445,6 +526,111 @@ pub fn main() !void {
     }
 }
 
+fn anyCommandUsage() !u8 {
+    try std.io.getStdErr().writer().print(
+        "any" ++ @tagName(build_options.exe) ++ " {s} from https://github.com/marler8997/anyzig\n" ++
+            "Here are the anyzig-specific subcommands:\n" ++
+            "  zig any set-verbosity LEVEL    | sets the default system-wide verbosity\n" ++
+            "                                 | accepts 'warn' or 'debug\n" ++
+            "  zig any version                | print the version of anyzig to stdout\n" ++
+            "  zig any list-installed         | list all installed zig versions\n",
+        .{@embedFile("version")},
+    );
+    return 0xff;
+}
+fn anyCommand(command: []const u8, args: []const []const u8) !u8 {
+    if (std.mem.eql(u8, command, "version")) {
+        if (args.len != 0) errExit("the 'version' subcommand does not take any cmdline args", .{});
+        try std.io.getStdOut().writer().print("{s}\n", .{@embedFile("version")});
+        return 0;
+    } else if (std.mem.eql(u8, command, "set-verbosity")) {
+        if (args.len == 0) errExit("missing VERBOSITY (either 'warn' or 'debug')", .{});
+        if (args.len != 1) errExit("too many cmdline args", .{});
+        const level_str = args[0];
+        const level: Verbosity = blk: {
+            if (std.mem.eql(u8, level_str, "warn")) break :blk .warn;
+            if (std.mem.eql(u8, level_str, "debug")) break :blk .debug;
+            errExit("unknown VERBOSITY '{s}', expected 'warn' or 'debug'", .{level_str});
+        };
+        {
+            const app_data_dir = try global.getAppDataDir();
+            const verbosity_path = std.fs.path.join(
+                global.arena,
+                &.{ app_data_dir, "verbosity" },
+            ) catch |e| oom(e);
+            defer global.arena.free(verbosity_path);
+            if (std.fs.path.dirname(verbosity_path)) |dir| {
+                try std.fs.cwd().makePath(dir);
+            }
+            const file = try std.fs.cwd().createFile(verbosity_path, .{});
+            defer file.close();
+            try file.writer().print("{s}\n", .{level_str});
+        }
+        switch (readVerbosityFile()) {
+            .no_app_data_dir => @panic("no app data dir?"),
+            .no_file => @panic("no file after writing it?"),
+            .loaded_from_file => |l| std.debug.assert(l == level),
+        }
+        return 0;
+    } else if (std.mem.eql(u8, command, "list-installed")) {
+        try showAvailableReleases();
+        std.process.exit(0);
+    } else errExit("unknown zig any '{s}' command", .{command});
+}
+
+fn showAvailableReleases() !void {
+    const app_data_path = try std.fs.getAppDataDir(global.arena, "anyzig");
+    defer global.arena.free(app_data_path);
+
+    log.info("Finding installed releases...", .{});
+
+    const hashstore_path = try std.fs.path.join(global.arena, &.{ app_data_path, "hashstore" });
+    try hashstore.init(hashstore_path);
+
+    // using io rather than log avoids the "anyzig: " prefix for formatting
+    io.getStdOut().writer().print("\n", .{}) catch {};
+    log.info("Installed Zig releases for {s}-{s}:", .{ os, arch });
+
+    // Check for installed master version
+    const master_version_name = std.fmt.allocPrint(global.arena, "{s}-master", .{exe_str}) catch |e| oom(e);
+    const is_master_installed = hashstore.find(hashstore_path, master_version_name) catch |err| {
+        log.warn("Failed to check if master is installed: {s}", .{@errorName(err)});
+        return;
+    } != null;
+
+    if (is_master_installed) {
+        std.log.info("master (installed)", .{});
+    }
+
+    // Iterate through hashstore to find all installed versions
+    var dir = std.fs.cwd().openDir(hashstore_path, .{ .iterate = true }) catch |err| {
+        log.err("Failed to open hashstore directory: {s}", .{@errorName(err)});
+        return error.DirOpenFailed;
+    };
+    defer dir.close();
+
+    var walker = try dir.walk(global.arena);
+    defer walker.deinit();
+
+    var found_any = false;
+    while (try walker.next()) |entry| {
+        if (entry.kind == .file) {
+            const file_name = entry.basename;
+            if (std.mem.startsWith(u8, file_name, exe_str)) {
+                const version_part = file_name[exe_str.len + 1 ..]; // +1 for the '-'
+                if (!std.mem.eql(u8, version_part, "master")) {
+                    std.log.info("{s}", .{version_part});
+                    found_any = true;
+                }
+            }
+        }
+    }
+
+    if (!found_any and !is_master_installed) {
+        log.warn("No installed versions found for {s}-{s}", .{ os, arch });
+    }
+}
+
 const SemanticVersion = struct {
     const max_pre = 50;
     const max_build = 50;
@@ -504,7 +690,7 @@ const SemanticVersion = struct {
         };
     }
     pub fn eql(self: SemanticVersion, other: SemanticVersion) bool {
-        return self.major == other.major and self.minor == other.minor and self.patch == other.patch;
+        return self.ref().order(other.ref()) == .eq;
     }
     pub fn format(
         self: SemanticVersion,
@@ -544,13 +730,17 @@ const os = switch (builtin.os.tag) {
     else => @compileError("Unsupported OS"),
 };
 
-const url_platform = os ++ "-" ++ arch;
-const json_arch_os = arch ++ "-" ++ os;
+const os_arch = os ++ "-" ++ arch;
+const arch_os = arch ++ "-" ++ os;
 const archive_ext = if (builtin.os.tag == .windows) "zip" else "tar.xz";
 
-const VersionKind = enum { release, dev };
-fn determineVersionKind(semantic_version: SemanticVersion) VersionKind {
-    return if (semantic_version.pre == null and semantic_version.build == null) .release else .dev;
+const VersionKind = union(enum) { release: Release, dev };
+fn determineVersionKind(v: SemanticVersion) VersionKind {
+    return if (v.pre == null and v.build == null) .{ .release = .{
+        .major = v.major,
+        .minor = v.minor,
+        .patch = v.patch,
+    } } else .dev;
 }
 
 const DownloadIndexKind = enum {
@@ -586,104 +776,37 @@ const DownloadUrl = struct {
     }
 };
 
-fn showAvailableReleases(arena: Allocator) !void {
-    const app_data_path = try std.fs.getAppDataDir(arena, "anyzig");
-    defer arena.free(app_data_path);
-
-    const download_index_kind: DownloadIndexKind = .official;
-    const index_path = try std.fs.path.join(arena, &.{ app_data_path, download_index_kind.basename() });
-    defer arena.free(index_path);
-
-    log.info("Finding available releases...", .{});
-
-    downloadFile(arena, download_index_kind.url(), index_path) catch |err| {
-        log.err("Failed to download release index: {s}", .{@errorName(err)});
-        return error.DownloadFailed;
-    };
-
-    const file = std.fs.cwd().openFile(index_path, .{}) catch |err| {
-        log.err("Failed to open index file: {s}", .{@errorName(err)});
-        return error.FileOpenFailed;
-    };
-    defer file.close();
-
-    const index_content = file.readToEndAlloc(arena, std.math.maxInt(usize)) catch |err| {
-        log.err("Failed to read index file: {s}", .{@errorName(err)});
-        return error.FileReadFailed;
-    };
-    defer arena.free(index_content);
-
-    const root = std.json.parseFromSlice(std.json.Value, arena, index_content, .{
-        .allocate = .alloc_if_needed,
-    }) catch |err| {
-        log.err("Failed to parse index JSON: {s}", .{@errorName(err)});
-        return error.JsonParseFailed;
-    };
-    defer root.deinit();
-
-    const versions = root.value.object;
-    if (versions.count() == 0) {
-        log.warn("No versions found in index", .{});
-        return;
+const Release = struct {
+    major: usize,
+    minor: usize,
+    patch: usize,
+    pub fn order(a: Release, b: Release) std.math.Order {
+        if (a.major != b.major) return std.math.order(a.major, b.major);
+        if (a.minor != b.minor) return std.math.order(a.minor, b.minor);
+        return std.math.order(a.patch, b.patch);
     }
+};
 
-    const hashstore_path = try std.fs.path.join(arena, &.{ app_data_path, "hashstore" });
-    try hashstore.init(hashstore_path);
-
-    // using io rather than log avoids the "anyzig: " prefix for formatting
-    io.getStdOut().writer().print("\n", .{}) catch {};
-    log.info("Available Zig releases for {s}-{s}:", .{ os, arch });
-    log.info("----------------------------------------", .{});
-
-    if (versions.get("master")) |master_obj| {
-        if (master_obj.object.get("version")) |version_val| {
-            const version_name = std.fmt.allocPrint(arena, "{s}-{s}", .{ exe_str, version_val.string }) catch |e| oom(e);
-            const is_installed = hashstore.find(hashstore_path, version_name) catch |err| {
-                log.warn("Failed to check if master is installed: {s}", .{@errorName(err)});
-                return;
-            } != null;
-            std.log.info("master ({s}){s}", .{ version_val.string, if (is_installed) " (installed)" else "" });
-        } else {
-            log.warn("Master version found but no version string", .{});
-        }
-    }
-
-    var it = versions.iterator();
-    var found_any = false;
-    while (it.next()) |entry| {
-        const version_str = entry.key_ptr.*;
-        if (std.mem.eql(u8, version_str, "master")) continue;
-
-        const version_obj = entry.value_ptr.*.object;
-        if (version_obj.get(json_arch_os)) |arch_os_obj| {
-            if (arch_os_obj.object.get("tarball")) |_| {
-                const version_name = std.fmt.allocPrint(arena, "{s}-{s}", .{ exe_str, version_str }) catch |e| oom(e);
-                const is_installed = hashstore.find(hashstore_path, version_name) catch |err| {
-                    log.warn("Failed to check if version {s} is installed: {s}", .{ version_str, @errorName(err) });
-                    return;
-                } != null;
-                std.log.info("{s}{s}", .{ version_str, if (is_installed) " (installed)" else "" });
-                found_any = true;
-            }
-        }
-    }
-
-    if (!found_any) {
-        log.warn("No releases found for {s}-{s}", .{ os, arch });
-    }
-}
+// The Zig release where the OS-ARCH in the url was swapped to ARCH-OS
+const arch_os_swap_release: Release = .{ .major = 0, .minor = 14, .patch = 1 };
 
 fn makeOfficialUrl(arena: Allocator, semantic_version: SemanticVersion) DownloadUrl {
     return switch (determineVersionKind(semantic_version)) {
         .dev => DownloadUrl.initOfficial(std.fmt.allocPrint(
             arena,
-            "https://ziglang.org/builds/zig-" ++ url_platform ++ "-{0}." ++ archive_ext,
+            "https://ziglang.org/builds/zig-" ++ arch_os ++ "-{0}." ++ archive_ext,
             .{semantic_version},
         ) catch |e| oom(e)),
-        .release => DownloadUrl.initOfficial(std.fmt.allocPrint(
+        .release => |release| DownloadUrl.initOfficial(std.fmt.allocPrint(
             arena,
-            "https://ziglang.org/download/{0}/zig-" ++ url_platform ++ "-{0}." ++ archive_ext,
-            .{semantic_version},
+            "https://ziglang.org/download/{0}/zig-{1s}-{0}." ++ archive_ext,
+            .{
+                semantic_version,
+                switch (release.order(arch_os_swap_release)) {
+                    .lt => os_arch,
+                    .gt, .eq => arch_os,
+                },
+            },
         ) catch |e| oom(e)),
     };
 }
@@ -692,12 +815,11 @@ fn getVersionUrl(
     arena: Allocator,
     app_data_path: []const u8,
     semantic_version: SemanticVersion,
-    arch_os: []const u8,
 ) !DownloadUrl {
     if (build_options.exe == .zls) return DownloadUrl.initOfficial(std.fmt.allocPrint(
         arena,
         "https://builds.zigtools.org/zls-{s}-{}.{s}",
-        .{ url_platform, semantic_version, archive_ext },
+        .{ os_arch, semantic_version, archive_ext },
     ) catch |e| oom(e));
 
     if (!isMachVersion(semantic_version)) return makeOfficialUrl(arena, semantic_version);
@@ -716,7 +838,7 @@ fn getVersionUrl(
             break :blk try file.readToEndAlloc(arena, std.math.maxInt(usize));
         };
         defer arena.free(index_content);
-        if (extractUrlFromMachDownloadIndex(arena, semantic_version, arch_os, index_path, index_content)) |url|
+        if (extractUrlFromMachDownloadIndex(arena, semantic_version, index_path, index_content)) |url|
             return url;
     }
 
@@ -728,7 +850,7 @@ fn getVersionUrl(
         break :blk try file.readToEndAlloc(arena, std.math.maxInt(usize));
     };
     defer arena.free(index_content);
-    return extractUrlFromMachDownloadIndex(arena, semantic_version, arch_os, index_path, index_content) orelse {
+    return extractUrlFromMachDownloadIndex(arena, semantic_version, index_path, index_content) orelse {
         errExit("compiler version '{}' is missing from download index {s}", .{ semantic_version, index_path });
     };
 }
@@ -761,7 +883,6 @@ fn extractMasterVersion(
 fn extractUrlFromMachDownloadIndex(
     allocator: std.mem.Allocator,
     semantic_version: SemanticVersion,
-    arch_os: []const u8,
     index_filepath: []const u8,
     download_index: []const u8,
 ) ?DownloadUrl {
@@ -1058,10 +1179,11 @@ fn findBuildRoot(arena: Allocator, options: FindBuildRootOptions) !?BuildRoot {
     while (true) {
         const joined_path = try fs.path.join(arena, &[_][]const u8{ dirname, build_zig_basename });
         if (fs.cwd().access(joined_path, .{})) |_| {
-            const dir = fs.cwd().openDir(dirname, .{}) catch |err| {
+            const dir = fs.cwd().openDir(dirname, .{ .iterate = true }) catch |err| {
                 errExit("unable to open directory while searching for build.zig file, '{s}': {s}", .{ dirname, @errorName(err) });
             };
-            return .{
+
+            if (try caseMatches(dir, build_zig_basename)) return .{
                 .build_zig_basename = build_zig_basename,
                 .directory = .{
                     .path = dirname,
@@ -1070,13 +1192,23 @@ fn findBuildRoot(arena: Allocator, options: FindBuildRootOptions) !?BuildRoot {
                 .cleanup_build_dir = dir,
             };
         } else |err| switch (err) {
-            error.FileNotFound => {
-                dirname = fs.path.dirname(dirname) orelse return null;
-                continue;
-            },
+            error.FileNotFound => {},
             else => |e| return e,
         }
+        dirname = fs.path.dirname(dirname) orelse return null;
     }
+}
+
+fn caseMatches(iterable_dir: std.fs.Dir, name: []const u8) !bool {
+    // TODO: maybe there is more efficient platform-specific mechanisms to implement this?
+    var iterator = iterable_dir.iterate();
+    var found_case_insensitive_match = false;
+    while (try iterator.next()) |entry| {
+        if (std.mem.eql(u8, entry.name, name)) return true;
+        found_case_insensitive_match = found_case_insensitive_match or std.ascii.eqlIgnoreCase(entry.name, name);
+    }
+    if (!found_case_insensitive_match) return error.FileNotFound;
+    return false;
 }
 
 fn errExit(comptime format: []const u8, args: anytype) noreturn {
