@@ -62,6 +62,14 @@ const global = struct {
             .err => |e| e,
         };
     }
+
+    var root_progress_node: ?std.Progress.Node = null;
+    fn getRootProgressNode() std.Progress.Node {
+        if (root_progress_node == null) {
+            root_progress_node = std.Progress.start(.{ .root_name = "anyzig" });
+        }
+        return root_progress_node.?;
+    }
 };
 
 fn readVerbosityFile() union(enum) {
@@ -283,6 +291,10 @@ fn determineSemanticVersion(scratch: Allocator, build_root: BuildRoot) !Semantic
 }
 
 pub fn main() !void {
+    defer if (global.root_progress_node) |n| {
+        n.end();
+    };
+
     defer _ = global.gpa_instance.deinit();
     const gpa = global.gpa;
 
@@ -371,7 +383,7 @@ pub fn main() !void {
             const download_index_kind: DownloadIndexKind = .official;
             const index_path = try std.fs.path.join(arena, &.{ app_data_path, download_index_kind.basename() });
             defer arena.free(index_path);
-            try downloadFile(arena, download_index_kind.url(), index_path);
+            try fetchFile(arena, download_index_kind.url(), download_index_kind.uri(), index_path);
             const index_content = blk: {
                 // since we just downloaded the file, this should always succeed now
                 const file = try std.fs.cwd().openFile(index_path, .{});
@@ -787,6 +799,9 @@ const DownloadIndexKind = enum {
             .mach => "https://machengine.org/zig/index.json",
         };
     }
+    pub fn uri(self: DownloadIndexKind) std.Uri {
+        return std.Uri.parse(self.url()) catch unreachable;
+    }
     pub fn basename(self: DownloadIndexKind) []const u8 {
         return switch (self) {
             .official => "download-index.json",
@@ -877,7 +892,7 @@ fn getVersionUrl(
             return url;
     }
 
-    try downloadFile(arena, download_index_kind.url(), index_path);
+    try fetchFile(arena, download_index_kind.url(), download_index_kind.uri(), index_path);
     const index_content = blk: {
         // since we just downloaded the file, this should always succeed now
         const file = try std.fs.cwd().openFile(index_path, .{});
@@ -972,112 +987,120 @@ fn hashAndPath(hash: zig.Package.Hash) HashAndPath {
     return result;
 }
 
-fn downloadFile(allocator: Allocator, url: []const u8, out_filepath: []const u8) !void {
-    log.info("downloading '{s}' to '{s}'", .{ url, out_filepath });
+fn fetchFile(
+    scratch: Allocator,
+    url_string: []const u8,
+    uri: std.Uri,
+    out_filepath: []const u8,
+) !void {
+    log.info("fetch '{}' to '{s}'", .{ uri, out_filepath });
+    const root = global.getRootProgressNode();
 
-    const lock_filepath = try std.mem.concat(allocator, u8, &.{ out_filepath, ".lock" });
-    defer allocator.free(lock_filepath);
+    const progress_node_name = std.fmt.allocPrint(scratch, "fetch {s}", .{uri}) catch |e| oom(e);
+    defer scratch.free(progress_node_name);
+    const node = root.start(progress_node_name, 1);
+    defer node.end();
 
+    const lock_filepath = try std.mem.concat(scratch, u8, &.{ out_filepath, ".lock" });
+    defer scratch.free(lock_filepath);
+
+    // TODO: might be nice for the lock file to report progress as well?
     var file_lock = try LockFile.lock(lock_filepath);
     defer file_lock.unlock();
 
-    std.fs.cwd().deleteFile(out_filepath) catch |err| switch (err) {
-        error.FileNotFound => {},
-        else => |e| return e,
-    };
-    const tmp_filepath = try std.mem.concat(allocator, u8, &.{ out_filepath, ".downloading" });
-    defer allocator.free(tmp_filepath);
-    std.fs.cwd().deleteFile(tmp_filepath) catch |err| switch (err) {
-        error.FileNotFound => {},
-        else => |e| return e,
-    };
-
-    if (std.fs.path.dirname(tmp_filepath)) |dir| {
-        try std.fs.cwd().makePath(dir);
-    }
-    const tmp_file = try std.fs.cwd().createFile(tmp_filepath, .{});
-    defer tmp_file.close();
-    switch (download(allocator, url, tmp_file.writer())) {
-        .ok => try std.fs.cwd().rename(tmp_filepath, out_filepath),
-        .err => |err| {
-            log.err("could not download '{s}': {s}", .{ url, err });
-            std.process.exit(0xff);
-        },
-    }
-}
-
-const DownloadResult = union(enum) {
-    ok: void,
-    err: []u8,
-    pub fn deinit(self: DownloadResult, allocator: Allocator) void {
-        switch (self) {
-            .ok => {},
-            .err => |e| allocator.free(e),
-        }
-    }
-};
-fn download(allocator: Allocator, url: []const u8, writer: anytype) DownloadResult {
-    const uri = std.Uri.parse(url) catch |err| return .{ .err = std.fmt.allocPrint(
-        allocator,
-        "the URL is invalid ({s})",
-        .{@errorName(err)},
-    ) catch |e| oom(e) };
-
-    var client = std.http.Client{ .allocator = allocator };
+    var client = std.http.Client{ .allocator = scratch };
     defer client.deinit();
-
-    client.initDefaultProxies(allocator) catch |err| return .{ .err = std.fmt.allocPrint(
-        allocator,
-        "failed to query the HTTP proxy settings with {s}",
-        .{@errorName(err)},
-    ) catch |e| oom(e) };
-
+    client.initDefaultProxies(scratch) catch |err| std.debug.panic(
+        "fetch '{}': init proxy failed with {s}",
+        .{ uri, @errorName(err) },
+    );
     var header_buffer: [4096]u8 = undefined;
     var request = client.open(.GET, uri, .{
         .server_header_buffer = &header_buffer,
         .keep_alive = false,
-    }) catch |err| return .{ .err = std.fmt.allocPrint(
-        allocator,
-        "failed to connect to the HTTP server with {s}",
-        .{@errorName(err)},
-    ) catch |e| oom(e) };
-
+    }) catch |e| std.debug.panic(
+        "fetch '{}': connect failed with {s}",
+        .{ uri, @errorName(e) },
+    );
     defer request.deinit();
+    request.send() catch |e| std.debug.panic(
+        "fetch '{}': send failed with {s}",
+        .{ uri, @errorName(e) },
+    );
+    request.wait() catch |e| std.debug.panic(
+        "fetch '{}': wait failed with {s}",
+        .{ uri, @errorName(e) },
+    );
+    if (request.response.status != .ok) return errExit(
+        "fetch '{}': HTTP response {} \"{?s}\"",
+        .{ uri, @intFromEnum(request.response.status), request.response.status.phrase() },
+    );
 
-    request.send() catch |err| return .{ .err = std.fmt.allocPrint(
-        allocator,
-        "failed to send the HTTP request with {s}",
-        .{@errorName(err)},
-    ) catch |e| oom(e) };
-    request.wait() catch |err| return .{ .err = std.fmt.allocPrint(
-        allocator,
-        "failed to read the HTTP response headers with {s}",
-        .{@errorName(err)},
-    ) catch |e| oom(e) };
+    const out_filepath_tmp = std.mem.concat(scratch, u8, &.{ out_filepath, ".fetching" }) catch |e| oom(e);
+    defer scratch.free(out_filepath_tmp);
 
-    if (request.response.status != .ok) return .{ .err = std.fmt.allocPrint(
-        allocator,
-        "the HTTP server replied with unsuccessful response '{d} {s}'",
-        .{ @intFromEnum(request.response.status), request.response.status.phrase() orelse "" },
-    ) catch |e| oom(e) };
-
-    // TODO: we take advantage of request.response.content_length
-
-    var buf: [4096]u8 = undefined;
-    while (true) {
-        const len = request.reader().read(&buf) catch |err| return .{ .err = std.fmt.allocPrint(
-            allocator,
-            "failed to read the HTTP response body with {s}'",
-            .{@errorName(err)},
-        ) catch |e| oom(e) };
-        if (len == 0)
-            return .ok;
-        writer.writeAll(buf[0..len]) catch |err| return .{ .err = std.fmt.allocPrint(
-            allocator,
-            "failed to write the HTTP response body with {s}'",
-            .{@errorName(err)},
-        ) catch |e| oom(e) };
+    const file = std.fs.cwd().createFile(out_filepath_tmp, .{}) catch |e| std.debug.panic(
+        "create '{s}' failed with {s}",
+        .{ out_filepath_tmp, @errorName(e) },
+    );
+    defer {
+        if (std.fs.cwd().deleteFile(out_filepath_tmp)) {
+            std.log.info("removed '{s}'", .{out_filepath_tmp});
+        } else |err| switch (err) {
+            error.FileNotFound => {},
+            else => |e| std.log.err("remove '{s}' failed with {s}", .{ out_filepath_tmp, @errorName(e) }),
+        }
+        file.close();
     }
+
+    const maybe_content_length: ?u64 = blk: {
+        // content length doesn't seem to be working with the mach index?
+        // not sure if it's a problem with the mach server or Zig's HTTP client
+        if (request.response.content_length) |content_length| {
+            if (std.mem.eql(u8, url_string, DownloadIndexKind.mach.url())) {
+                std.log.warn("ignoring content length {} for mach index", .{content_length});
+                break :blk null;
+            }
+        }
+        break :blk request.response.content_length;
+    };
+
+    if (maybe_content_length) |content_length| {
+        try file.setEndPos(content_length);
+    }
+
+    var total_received: u64 = 0;
+    while (true) {
+        var buf: [@max(std.heap.page_size_min, 4096)]u8 = undefined;
+        const len = request.reader().read(&buf) catch |e| std.debug.panic(
+            "fetch '{}': read failed with {s}",
+            .{ uri, @errorName(e) },
+        );
+        if (len == 0) break;
+        total_received += len;
+
+        if (maybe_content_length) |content_length| {
+            if (total_received > content_length) errExit(
+                "fetch '{}': read more than Content-Length ({})",
+                .{ uri, content_length },
+            );
+        }
+        // NOTE: not going through a buffered writer since we're writing
+        //       large chunks
+        file.writer().writeAll(buf[0..len]) catch |err| std.debug.panic(
+            "fetch '{}': write {} bytes of HTTP response failed with {s}",
+            .{ uri, len, @errorName(err) },
+        );
+    }
+
+    if (maybe_content_length) |content_length| {
+        if (total_received != content_length) errExit(
+            "fetch '{}': Content-Length is {} but only read {}",
+            .{ uri, content_length, total_received },
+        );
+    }
+
+    try std.fs.cwd().rename(out_filepath_tmp, out_filepath);
 }
 
 pub fn cmdFetch(
@@ -1102,11 +1125,6 @@ pub fn cmdFetch(
 
     try http_client.initDefaultProxies(arena);
 
-    var root_prog_node = std.Progress.start(.{
-        .root_name = "Fetch",
-    });
-    defer root_prog_node.end();
-
     var job_queue: Package.Fetch.JobQueue = .{
         .http_client = &http_client,
         .thread_pool = &thread_pool,
@@ -1127,7 +1145,7 @@ pub fn cmdFetch(
         .lazy_status = .eager,
         .parent_package_root = undefined,
         .parent_manifest_ast = null,
-        .prog_node = root_prog_node,
+        .prog_node = global.getRootProgressNode(),
         .job_queue = &job_queue,
         .omit_missing_hash_error = true,
         .allow_missing_paths_field = false,
@@ -1160,12 +1178,7 @@ pub fn cmdFetch(
         process.exit(1);
     }
 
-    const package_hash = fetch.computedPackageHash();
-
-    root_prog_node.end();
-    root_prog_node = .{ .index = .none };
-
-    return package_hash;
+    return fetch.computedPackageHash();
 }
 
 const BuildRoot = struct {
