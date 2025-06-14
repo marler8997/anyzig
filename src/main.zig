@@ -763,6 +763,7 @@ const VersionSpecifier = union(enum) {
 const arch = switch (builtin.cpu.arch) {
     .aarch64 => "aarch64",
     .arm => "armv7a",
+    .powerpc64 => "powerpc64",
     .powerpc64le => "powerpc64le",
     .riscv64 => "riscv64",
     .s390x => "s390x",
@@ -771,8 +772,10 @@ const arch = switch (builtin.cpu.arch) {
     else => @compileError("Unsupported CPU Architecture"),
 };
 const os = switch (builtin.os.tag) {
+    .freebsd => "freebsd",
     .linux => "linux",
     .macos => "macos",
+    .netbsd => "netbsd",
     .windows => "windows",
     else => @compileError("Unsupported OS"),
 };
