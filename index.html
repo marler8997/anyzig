@@ -7,11 +7,53 @@
     <link rel="stylesheet" href="styles.css" />
     <title>anyzig</title>
     <script>
+      "use strict";
+
+      const OS_LINUX = 0;
+      const OS_MACOS = 1;
+      const OS_WINDOWS = 2;
+      const ARCH_X86_64 = 0;
+      const ARCH_AARCH64 = 1;
+
+      let current_os = -1;
+      let current_arch = -1;
+      let include_curl = true;
+      let include_wget = true;
+      let include_powershell = false;
+
+      function showNotification(message, isError = false) {
+        const notification = document.createElement("div");
+        notification.textContent = message;
+        notification.style.cssText = `
+          position: fixed;
+          top: 20px;
+          right: 20px;
+          padding: 10px 20px;
+          border-radius: 4px;
+          background-color: ${isError ? "#ff4444" : "#ff99bb"};
+          color: white;
+          z-index: 1000;
+          transition: opacity 0.3s ease-in-out;
+          box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+        `;
+        document.body.appendChild(notification);
+
+        setTimeout(() => {
+          notification.style.opacity = "0";
+          setTimeout(() => notification.remove(), 300);
+        }, 2700);
+      }
+
       function get(id) {
         return document.getElementById(id);
       }
 
       function copyToClipboard(text) {
+        if (!text) {
+          showNotification("Nothing to copy", true);
+          return;
+        }
+
         navigator.clipboard
           .writeText(text)
           .then(() => {
@@ -50,7 +92,10 @@
       }
 
       function updateButton(button, enable) {
-        if (!button) return;
+        if (!button) {
+          console.warn("Button element not found");
+          return;
+        }
         if (enable) {
           button.classList.add("FilterButtonEnabled");
         } else {
@@ -59,6 +104,14 @@
       }
 
       function toggleOs(os) {
+        if (
+          typeof os !== "number" ||
+          ![OS_LINUX, OS_MACOS, OS_WINDOWS, -1].includes(os)
+        ) {
+          showNotification("Invalid operating system selected", true);
+          return;
+        }
+
         // Reset arch when changing OS to prevent invalid combinations
         if (current_os !== os) {
           current_arch = -1;
@@ -75,6 +128,14 @@
       }
 
       function toggleArch(arch) {
+        if (
+          typeof arch !== "number" ||
+          ![ARCH_X86_64, ARCH_AARCH64, -1].includes(arch)
+        ) {
+          showNotification("Invalid architecture selected", true);
+          return;
+        }
+
         current_arch = current_arch === arch ? -1 : arch;
         updateButton(get("ButtonX86_64"), current_arch === ARCH_X86_64);
         updateButton(get("ButtonAArch64"), current_arch === ARCH_AARCH64);
