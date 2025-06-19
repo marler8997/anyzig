@@ -1,121 +1,15 @@
 <!DOCTYPE html>
 <html>
   <head>
-    <title>anyzig</title>
-    <style>
-      * {
-        margin: 0;
-        padding: 0;
-      }
-      body {
-        margin-top: 30px;
-        font-family: courier;
-        text-align: center;
-        background: #333;
-        color: #ccc;
-      }
-      a {
-        color: #eee;
-      }
-      h1 {
-        color: #eee;
-      }
-      h2 {
-        color: #eee;
-      }
-      section {
-        display: grid;
-        justify-items: center;
-        align-items: center;
-      }
-      code {
-        padding: 0.75em;
-        font-family: courier new;
-        text-align: left;
-        word-wrap: break-word;
-        background: #111;
-      }
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="description" content="Install anyzig, a Zig package manager.">
+<link rel="stylesheet" href="styles.css">
+<title>anyzig</title>
+<script>
 
-      #InstallDiv {
-        margin: 10px;
-      }
+function get(id) { return document.getElementById(id); }
 
-      .CopyButton {
-        padding: 5px;
-      }
-
-      .FilterButton {
-        display: inline-block;
-        width: 60px;
-        height: 15px;
-        line-height: 15px;
-        text-align: center;
-        padding: 10px;
-        border-radius: 2px;
-        border: 0;
-        background: #ccc;
-        font-size: 15px;
-        color: #000;
-        cursor: default;
-        user-select: none;
-        font-weight: bold;
-      }
-      .FilterButton:hover {
-        background: #aaa;
-      }
-      .FilterButtonEnabled {
-        background: #4287f5;
-      }
-      .FilterButtonEnabled:hover {
-        background: #3277e5;
-      }
-
-      .Commands {
-        display: grid;
-        gap: 1em;
-        grid-auto-rows: 5em;
-      }
-      .Commands div {
-        display: grid;
-        gap: 3em;
-        grid-template-columns: 10em 45em;
-      }
-    </style>
-    <script>
-      "use strict";
-      
-      const OS_LINUX = 0;
-      const OS_MACOS = 1;
-      const OS_WINDOWS = 2;
-      const ARCH_X86_64 = 0;
-      const ARCH_AARCH64 = 1;
-
-      let current_os = -1;
-      let current_arch = -1;
-      let include_curl = true;
-      let include_wget = true;
-      let include_powershell = false;
-
-      function showNotification(message, isError = false) {
-        const notification = document.createElement('div');
-        notification.textContent = message;
-        notification.style.cssText = `
-          position: fixed;
-          top: 20px;
-          right: 20px;
-          padding: 10px 20px;
-          border-radius: 4px;
-          background-color: ${isError ? '#ff4444' : '#44ff44'};
-          color: white;
-          z-index: 1000;
-        `;
-        document.body.appendChild(notification);
-        setTimeout(() => notification.remove(), 3000);
-      }
-
-      function get(id) {
-        return document.getElementById(id);
-      }
 
       function copyToClipboard(text) {
         navigator.clipboard
