@@ -1,0 +1,74 @@
+2. User Agent Detection Issues:
+
+```javascript
+if (userAgent.indexOf("MacOS") != -1) toggleOs(OS_MACOS);
+```
+Variable Declaration Issues:
+html = ""; // Using undeclared variable
+var ids = { next_id: 0 }; // Mixing var with let declarations
+
+The 'html' variable is used without being declared (missing let/const), which could cause issues in strict mode.
+
+4. Command Generation Logic Gap:
+
+```javascript
+if (include_curl) {
+  html += generateCommandHtml(ids, "curl -L " + archive_url + " | tar xz");
+}
+```
+The tar command is always included for both .tar.gz and .zip files, which is incorrect for Windows users. The command should be different based on archive_ext.
+
+5. State Management Issue:
+
+```javascript
+function toggleOs(os) {
+  if (current_os == os) {
+    current_os = -1;
+  } else {
+    current_os = os;
+  }
+  // ...
+}
+```
+
+```javascript
+function copyToClipboard(text) {
+  navigator.clipboard.writeText(text)
+    .then(() => {
+      console.log("Text copied to clipboard");
+    })
+    .catch((err) => {
+      console.error("Could not copy text: ", err);
+    });
+}
+```
+The error is only logged to console - users get no feedback if the copy operation fails.
+
+Pre Variable Scope Issue:
+function copyCommand(id) {
+  pre = get("command" + id); // Undeclared variable
+  copyToClipboard(pre.innerHTML);
+}
+
+The 'pre' variable is used without being declared, which could cause issues in strict mode.
+
+
+- Added proper error handling and user feedback with the new showNotification function
+
+- Fixed OS detection by using proper user agent strings (macintosh instead of MacOS)
+
+- Added strict mode and proper variable declarations
+
+- Improved command generation with separate getInstallCommand function
+
+- Added proper state management for OS/arch selection
+
+- Added user guidance messages when no OS or arch is selected
+
+- Added better error handling for clipboard operations
+
+- Improved ARM64 detection
+
+- Added null checks for DOM elements
+
+- Removed the problematic empty alert
