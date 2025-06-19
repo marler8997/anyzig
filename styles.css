@@ -1,85 +1,86 @@
 * {
-    margin: 0;
-    padding: 0;
+  margin: 0;
+  padding: 0;
 }
 
 body {
-    margin-top: 30px;
-    font-family: courier;
-    text-align: center;
-    background: #333;
-    color: #ccc;
+  margin-top: 30px;
+  font-family: courier;
+  text-align: center;
+  background: #333;
+  color: #ccc;
 }
 
 a {
-    color: #eee
+  color: #eee;
 }
 
 h1 {
-    color: #eee
+  color: #eee;
 }
 
 h2 {
-    color: #eee
+  color: #eee;
 }
 
 section {
-    display: grid;
-    justify-items: center;
-    align-items: center;
+  display: grid;
+  justify-items: center;
+  align-items: center;
 }
 
 code {
-    padding: 0.75em;
-    font-family: courier new;
-    text-align: left;
-    word-wrap: break-word;
-    background: #111;
+  padding: 0.75em;
+  font-family: courier new;
+  text-align: left;
+  word-wrap: break-word;
+  background: #111;
 }
 
 #InstallDiv {
-    margin: 10px;
+  margin: 10px;
 }
 
 .CopyButton {
-    padding: 5px;
+  padding: 5px;
 }
 .FilterButton {
-    display: inline-block;
-    width: 60px;
-    height: 15px;
-    line-height: 15px;
-    text-align: center;
-    padding: 10px;
-    border-radius: 2px;
-    border: 0;
-    background: #ccc;
-    font-size: 15px;
-    color: #000;
-    cursor: default;
-    user-select: none;
-    font-weight: bold;
+  display: inline-block;
+  width: 60px;
+  height: 15px;
+  line-height: 15px;
+  text-align: center;
+  padding: 10px;
+  border-radius: 2px;
+  border: 0;
+  background: #ccc;
+  font-size: 15px;
+  color: #000;
+  cursor: default;
+  user-select: none;
+  font-weight: bold;
 }
 
 .FilterButton:hover {
-    background: #aaa;
+  background: #aaa;
 }
 
 .FilterButtonEnabled {
-    background: #4287f5;
+  background: #4287f5;
 }
 
 .FilterButtonEnabled:hover {
-    background: #3277e5;
+  background: #3277e5;
 }
 
 .Commands {
-    display: grid;
-    gap: 1em;
-    grid-auto-rows: 5em;
+  display: grid;
+  gap: 1em;
+  grid-auto-rows: 5em;
 }
 
 .Commands div {
-    display: grid;
-    gap: 3em;
-    grid-template-columns: 10em 45em; }
+  display: grid;
+  gap: 3em;
+  grid-template-columns: 10em 45em;
+}

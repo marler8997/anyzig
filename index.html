@@ -1,15 +1,15 @@
 <!DOCTYPE html>
 <html>
   <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="description" content="Install anyzig, a Zig package manager.">
-<link rel="stylesheet" href="styles.css">
-<title>anyzig</title>
-<script>
-
-function get(id) { return document.getElementById(id); }
-
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="Install anyzig, a Zig package manager." />
+    <link rel="stylesheet" href="styles.css" />
+    <title>anyzig</title>
+    <script>
+      function get(id) {
+        return document.getElementById(id);
+      }
 
       function copyToClipboard(text) {
         navigator.clipboard
@@ -65,9 +65,9 @@ function get(id) { return document.getElementById(id); }
           updateButton(get("ButtonX86_64"), false);
           updateButton(get("ButtonAArch64"), false);
         }
-        
+
         current_os = current_os === os ? -1 : os;
-        
+
         updateButton(get("ButtonLinux"), current_os === OS_LINUX);
         updateButton(get("ButtonMacos"), current_os === OS_MACOS);
         updateButton(get("ButtonWindows"), current_os === OS_WINDOWS);
@@ -93,7 +93,7 @@ function get(id) { return document.getElementById(id); }
         let arch_os = null;
         let archive_ext = null;
         include_powershell = false;
-        
+
         if (current_os === OS_LINUX) {
           archive_ext = ".tar.gz";
           if (current_arch === ARCH_X86_64) {
@@ -178,7 +178,10 @@ function get(id) { return document.getElementById(id); }
 
         if (userAgent.includes("x64") || userAgent.includes("x86_64")) {
           toggleArch(ARCH_X86_64);
-        } else if (userAgent.includes("aarch64") || userAgent.includes("arm64")) {
+        } else if (
+          userAgent.includes("aarch64") ||
+          userAgent.includes("arm64")
+        ) {
           toggleArch(ARCH_AARCH64);
         }
       }
