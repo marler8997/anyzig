@@ -44,6 +44,7 @@ const global = struct {
     var arena_instance = std.heap.ArenaAllocator.init(gpa);
     const arena = arena_instance.allocator();
 
+    var mirror_url: ?[]const u8 = null;
     var cached_verbosity: ?Verbosity = null;
     var cached_app_data_dir: ?union(enum) {
         ok: []const u8,
@@ -304,11 +305,26 @@ pub fn main() !void {
     const all_args = try std.process.argsAlloc(arena);
     defer arena.free(all_args);
 
-    const argv_index: usize, const manual_version: ?VersionSpecifier = blk: {
-        if (all_args.len >= 2) {
-            if (VersionSpecifier.parse(all_args[1])) |v| break :blk .{ 2, v };
+    var argv_index: usize = 1;
+    while (argv_index < all_args.len) : (argv_index += 1) {
+        const arg = all_args[argv_index];
+        if (std.mem.eql(u8, arg, "--mirror")) {
+            argv_index += 1;
+            if (argv_index == all_args.len) errExit("missing value for --mirror", .{});
+            global.mirror_url = all_args[argv_index];
+            continue;
         }
-        break :blk .{ 1, null };
+        break;
+    }
+
+    const manual_version: ?VersionSpecifier = blk: {
+        if (argv_index < all_args.len) {
+            if (VersionSpecifier.parse(all_args[argv_index])) |v| {
+                argv_index += 1;
+                break :blk v;
+            }
+        }
+        break :blk null;
     };
 
     const maybe_command: ?[]const u8 = if (argv_index >= all_args.len) null else all_args[argv_index];
@@ -541,9 +557,10 @@ pub fn main() !void {
 fn anyCommandUsage() !u8 {
     try std.io.getStdErr().writer().print(
         "any" ++ @tagName(build_options.exe) ++ " {s} from https://github.com/marler8997/anyzig\n" ++
+            "  --mirror                          | set the mirror to download zig\n" ++
             "Here are the anyzig-specific subcommands:\n" ++
             "  zig any set-verbosity LEVEL    | sets the default system-wide verbosity\n" ++
-            "                                 | accepts 'warn' or 'debug\n" ++
+            "                                 | accepts 'warn' or 'debug'\n" ++
             "  zig any version                | print the version of anyzig to stdout\n" ++
             "  zig any list-installed         | list all versions of zig installed in the global cache\n",
         .{@embedFile("version")},
@@ -797,10 +814,15 @@ const DownloadIndexKind = enum {
     official,
     mach,
     pub fn url(self: DownloadIndexKind) []const u8 {
-        return switch (self) {
+        const official_url = switch (self) {
             .official => "https://ziglang.org/download/index.json",
             .mach => "https://machengine.org/zig/index.json",
         };
+        if (global.mirror_url) |mirror| {
+            const filename = fs.path.basename(official_url);
+            return std.fmt.allocPrint(global.arena, "{s}/{s}", .{ mirror, filename }) catch |e| oom(e);
+        }
+        return official_url;
     }
     pub fn uri(self: DownloadIndexKind) std.Uri {
         return std.Uri.parse(self.url()) catch unreachable;
@@ -844,13 +866,13 @@ const Release = struct {
 const arch_os_swap_release: Release = .{ .major = 0, .minor = 14, .patch = 1 };
 
 fn makeOfficialUrl(arena: Allocator, semantic_version: SemanticVersion) DownloadUrl {
-    return switch (determineVersionKind(semantic_version)) {
-        .dev => DownloadUrl.initOfficial(std.fmt.allocPrint(
+    const official_url = switch (determineVersionKind(semantic_version)) {
+        .dev => std.fmt.allocPrint(
             arena,
             "https://ziglang.org/builds/zig-" ++ arch_os ++ "-{0}." ++ archive_ext,
             .{semantic_version},
-        ) catch |e| oom(e)),
-        .release => |release| DownloadUrl.initOfficial(std.fmt.allocPrint(
+        ) catch |e| oom(e),
+        .release => |release| std.fmt.allocPrint(
             arena,
             "https://ziglang.org/download/{0}/zig-{1s}-{0}." ++ archive_ext,
             .{
@@ -860,8 +882,14 @@ fn makeOfficialUrl(arena: Allocator, semantic_version: SemanticVersion) Download
                     .gt, .eq => arch_os,
                 },
             },
-        ) catch |e| oom(e)),
+        ) catch |e| oom(e),
     };
+    if (global.mirror_url) |mirror| {
+        const basename = fs.path.basename(official_url);
+        const mirror_url = std.fmt.allocPrint(arena, "{s}/{s}", .{ mirror, basename }) catch |e| oom(e);
+        return .{ .official = official_url, .fetch = mirror_url };
+    }
+    return DownloadUrl.initOfficial(official_url);
 }
 
 fn getVersionUrl(
