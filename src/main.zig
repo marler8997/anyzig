@@ -413,7 +413,13 @@ pub fn main() !void {
 
     const override_global_cache_dir: ?[]const u8 = try EnvVar.ZIG_GLOBAL_CACHE_DIR.get(arena);
     var global_cache_directory: Directory = l: {
-        const p = override_global_cache_dir orelse try introspect.resolveGlobalCacheDir(arena);
+        const p = if (override_global_cache_dir) |dir| dir else blk: {
+            if (std.process.getEnvVarOwned(arena, "ANYZIG_DATA_DIR")) |custom_data_dir| {
+                break :blk try std.fs.path.join(arena, &.{ custom_data_dir, "zig" });
+            } else |_| {
+                break :blk try introspect.resolveGlobalCacheDir(arena);
+            }
+        };
         break :l .{
             .handle = try fs.cwd().makeOpenPath(p, .{}),
             .path = p,
