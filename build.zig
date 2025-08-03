@@ -322,6 +322,21 @@ fn addTests(
             t.run.expectStdOutEqual(comptime zig_release.getVersionOutput() ++ "\n");
         }
 
+        for ([_][]const u8{ "-h", "--help" }) |help_flag| {
+            if (zig_release == .@"0.7.0" and std.mem.eql(u8, help_flag, "-h"))
+                continue;
+            const t = test_factory.add(.{
+                .name = b.fmt("test-{s}-init{s}", .{ zig_version, help_flag }),
+                .input_dir = .no_input,
+                .options = .nosetup,
+                .args = &.{ zig_version, switch (zig_release.getInitKind()) {
+                    .simple => "init",
+                    .exe_and_lib => "init-exe",
+                }, help_flag },
+            });
+            t.run.addCheck(.{ .expect_stdout_match = "Usage: zig init" });
+        }
+
         const build_enabled = switch (b.graph.host.result.os.tag) {
             .macos => switch (b.graph.host.result.cpu.arch) {
                 .aarch64 => switch (zig_release) {
