@@ -25,6 +25,7 @@ pub const log = std.log;
 
 const hashstore = @import("hashstore.zig");
 const LockFile = @import("LockFile.zig");
+const Cmdline = @import("Cmdline.zig");
 
 pub const std_options: std.Options = .{
     .logFn = anyzigLog,
@@ -301,17 +302,17 @@ pub fn main() !void {
     defer global.arena_instance.deinit();
     const arena = global.arena;
 
-    const all_args = try std.process.argsAlloc(arena);
-    defer arena.free(all_args);
+    const cmdline: Cmdline = try .alloc(arena);
+    defer cmdline.free(arena);
 
-    const argv_index: usize, const manual_version: ?VersionSpecifier = blk: {
-        if (all_args.len >= 2) {
-            if (VersionSpecifier.parse(all_args[1])) |v| break :blk .{ 2, v };
+    const cmdline_offset: usize, const manual_version: ?VersionSpecifier = blk: {
+        if (cmdline.len() >= 2) {
+            if (VersionSpecifier.parse(cmdline.arg(1))) |v| break :blk .{ 2, v };
         }
         break :blk .{ 1, null };
     };
 
-    const maybe_command: ?[]const u8 = if (argv_index >= all_args.len) null else all_args[argv_index];
+    const maybe_command: ?[]const u8 = if (cmdline_offset >= cmdline.len()) null else cmdline.arg(cmdline_offset);
 
     const build_root_options = blk: {
         var options: FindBuildRootOptions = .{};
@@ -319,13 +320,13 @@ pub fn main() !void {
             .zig => {
                 if (maybe_command) |command| {
                     if (std.mem.eql(u8, command, "build")) {
-                        var index: usize = argv_index + 1;
-                        while (index < all_args.len) : (index += 1) {
-                            const arg = all_args[index];
+                        var index: usize = cmdline_offset + 1;
+                        while (index < cmdline.len()) : (index += 1) {
+                            const arg = cmdline.arg(index);
                             if (std.mem.eql(u8, arg, "--build-file")) {
-                                if (index == all_args.len) break;
+                                if (index == cmdline.len()) break;
                                 index += 1;
-                                options.build_file = all_args[index];
+                                options.build_file = cmdline.arg(index);
                                 log.info("build file '{s}'", .{options.build_file.?});
                             }
                         }
@@ -354,12 +355,7 @@ pub fn main() !void {
                 );
                 std.process.exit(0xff);
             }
-            if (std.mem.eql(u8, command, "any")) {
-                if (argv_index + 1 == all_args.len) {
-                    std.process.exit(try anyCommandUsage());
-                }
-                std.process.exit(try anyCommand(all_args[argv_index + 1], all_args[argv_index + 2 ..]));
-            }
+            if (std.mem.eql(u8, command, "any")) std.process.exit(try anyCommand(cmdline, cmdline_offset + 1));
         }
         if (manual_version) |version| break :blk .{ version, false };
         const build_root = try findBuildRoot(arena, build_root_options) orelse {
@@ -469,8 +465,8 @@ pub fn main() !void {
         //       our process gets killed
         var al: ArrayListUnmanaged([]const u8) = .{};
         try al.append(arena, versioned_exe);
-        for (all_args[argv_index..]) |arg| {
-            try al.append(arena, arg);
+        for (cmdline_offset..cmdline.len()) |arg_index| {
+            try al.append(arena, cmdline.arg(arg_index));
         }
         var child: std.process.Child = .init(al.items, arena);
         try child.spawn();
@@ -527,7 +523,7 @@ pub fn main() !void {
         const argv = blk: {
             var al: ArrayListUnmanaged(?[*:0]const u8) = .{};
             try al.append(arena, versioned_exe);
-            for (std.os.argv[argv_index..]) |arg| {
+            for (std.os.argv[cmdline_offset..]) |arg| {
                 try al.append(arena, arg);
             }
             break :blk try al.toOwnedSliceSentinel(arena, null);
@@ -551,15 +547,21 @@ fn anyCommandUsage() !u8 {
     return 0xff;
 }
 
-fn anyCommand(command: []const u8, args: []const []const u8) !u8 {
+fn anyCommand(cmdline: Cmdline, cmdline_offset: usize) !u8 {
+    if (cmdline_offset == cmdline.len()) {
+        std.process.exit(try anyCommandUsage());
+    }
+    const command = cmdline.arg(cmdline_offset);
+    const arg_offset = cmdline_offset + 1;
+
     if (std.mem.eql(u8, command, "version")) {
-        if (args.len != 0) errExit("the 'version' subcommand does not take any cmdline args", .{});
+        if (arg_offset < cmdline.len()) errExit("the 'version' subcommand does not take any cmdline args", .{});
         try std.io.getStdOut().writer().print("{s}\n", .{@embedFile("version")});
         return 0;
     } else if (std.mem.eql(u8, command, "set-verbosity")) {
-        if (args.len == 0) errExit("missing VERBOSITY (either 'warn' or 'debug')", .{});
-        if (args.len != 1) errExit("too many cmdline args", .{});
-        const level_str = args[0];
+        if (arg_offset >= cmdline.len()) errExit("missing VERBOSITY (either 'warn' or 'debug')", .{});
+        if (arg_offset + 1 < cmdline.len()) errExit("too many cmdline args", .{});
+        const level_str = cmdline.arg(arg_offset);
         const level: Verbosity = blk: {
             if (std.mem.eql(u8, level_str, "warn")) break :blk .warn;
             if (std.mem.eql(u8, level_str, "debug")) break :blk .debug;
@@ -586,7 +588,7 @@ fn anyCommand(command: []const u8, args: []const []const u8) !u8 {
         }
         return 0;
     } else if (std.mem.eql(u8, command, "list-installed")) {
-        if (args.len != 0) errExit("the 'list-installed' subcommand does not take any cmdline args", .{});
+        if (arg_offset < cmdline.len()) errExit("the 'list-installed' subcommand does not take any cmdline args", .{});
         try listInstalled();
         return 0;
     } else errExit("unknown zig any '{s}' command", .{command});
