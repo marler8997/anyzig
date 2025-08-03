@@ -348,7 +348,16 @@ pub fn main() !void {
                 std.process.exit(0xff);
             }
             if (build_options.exe == .zig and (std.mem.eql(u8, command, "init") or std.mem.eql(u8, command, "init-exe") or std.mem.eql(u8, command, "init-lib"))) {
-                if (manual_version) |version| break :blk .{ version, true };
+                const is_help = blk_is_help: {
+                    var index: usize = cmdline_offset + 1;
+                    while (index < cmdline.len()) : (index += 1) {
+                        const arg = cmdline.arg(index);
+                        if (std.mem.eql(u8, arg, "-h")) break :blk_is_help true;
+                        if (std.mem.eql(u8, arg, "--help")) break :blk_is_help true;
+                    } else break :blk_is_help false;
+                };
+
+                if (manual_version) |version| break :blk .{ version, !is_help };
                 try std.io.getStdErr().writer().print(
                     "error: anyzig init requires a version, i.e. 'zig 0.13.0 {s}'\n",
                     .{command},
