@@ -19,6 +19,12 @@ Anyzig also adds a few of its own commands, which can be queried and invoked wit
 
 Go to https://marler8997.github.io/anyzig and select your OS/Arch to get a download link and/or instructions to install via the command-line.
 
+You can also install anyzig using Homebrew:
+```bash
+brew tap matrixfurry.com/zig https://tangled.sh/@matrixfurry.com/homebrew-zig
+brew install anyzig
+```
+
 Otherwise, you can manually find and download/extract the applicable archive from Releases. It will contain a single static binary named `zig`, unless you're on Windows in which case it's 2 files, `zig.exe` and `zig.pdb`.
 
 # Mach Versions and Download Mirror
