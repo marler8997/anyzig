@@ -90,7 +90,7 @@ function copyToClipboard(text) {
 
   function copyCommand(id) {
       pre = get('command' + id);
-      copyToClipboard(pre.innerHTML)
+      copyToClipboard(pre.textContent)
   }
 
   function generateCommandHtml(ids, cmd) {
@@ -145,10 +145,12 @@ function copyToClipboard(text) {
   var include_curl = true;
   var include_wget = true;
   var include_powershell = false;
+  var include_brew = false;
 
   function updateInstallDiv() {
       var arch_os = null;
       var archive_ext = null;
+      include_brew = false;
       include_powershell = false;
       if (current_os == OS_LINUX) {
           archive_ext = ".tar.gz";
@@ -158,6 +160,7 @@ function copyToClipboard(text) {
               arch_os = "aarch64-linux";
           }
       } else if (current_os == OS_MACOS) {
+          include_brew = true;
           archive_ext = ".tar.gz";
           if (current_arch == ARCH_X86_64) {
               arch_os = "x86_64-macos";
@@ -184,6 +187,9 @@ function copyToClipboard(text) {
           html += '<br/><h2>Command Line Install:</h2>';
           html += "<section><div class='Commands'>";
           var ids = { next_id: 0 };
+          if (include_brew) {
+              html += generateCommandHtml(ids, 'brew tap anyzig/tap && brew install anyzig');
+          }
           if (include_curl) {
               html += generateCommandHtml(ids, 'curl -L ' + archive_url + ' | tar xz');
           }
