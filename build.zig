@@ -22,7 +22,7 @@ pub fn build(b: *std.Build) !void {
     const dev_version_embed = b.createModule(.{
         .root_source_file = write_files_version.add("version-dev", dev_version),
     });
-    b.getInstallStep().dependOn(&b.addInstallFile(release_version_file, "version-release").step);
+    const install_version_release_file = b.addInstallFile(release_version_file, "version-release");
 
     const write = b.addWriteFiles();
     _ = write.addCopyDirectory(zig_dep.path("."), "", .{});
@@ -104,6 +104,8 @@ pub fn build(b: *std.Build) !void {
     const ci_step = b.step("ci", "The build/test step to run on the CI");
     ci_step.dependOn(b.getInstallStep());
     ci_step.dependOn(test_step);
+    ci_step.dependOn(&install_version_release_file.step);
+
     try ci(b, &release_version, release_version_embed, zig_mod, ci_step, host_zip_exe);
 }
 
