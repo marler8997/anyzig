@@ -7,8 +7,13 @@ const Exe = enum { zig, zls };
 pub fn build(b: *std.Build) !void {
     const zig_dep = b.dependency("zig", .{});
 
-    const release_version = try makeCalVersion();
-    const dev_version = b.fmt("{s}-dev", .{release_version});
+    const version_option: ?[11]u8 = if (b.option(
+        []const u8,
+        "force-version",
+        "Force a specific version, bypassing the automatic calendar version.",
+    )) |v| verifyForceVersion(v) else null;
+    const release_version = if (version_option) |v| v else try makeCalVersion();
+    const dev_version = b.fmt("{s}-dev", .{if (version_option) |v| v else release_version});
     const write_files_version = b.addWriteFiles();
     const release_version_file = write_files_version.add("version-release", &release_version);
     const release_version_embed = b.createModule(.{
@@ -100,6 +105,36 @@ pub fn build(b: *std.Build) !void {
     ci_step.dependOn(b.getInstallStep());
     ci_step.dependOn(test_step);
     try ci(b, &release_version, release_version_embed, zig_mod, ci_step, host_zip_exe);
+}
+
+fn verifyForceVersion(v: []const u8) [11]u8 {
+    if (v.len != 11) std.debug.panic(
+        "bad force-version '{s}': must be 11 characters, but got {d}",
+        .{ v, v.len },
+    );
+    if (v[0] != 'v' or v[5] != '_' or v[8] != '_') std.debug.panic(
+        "bad force-version '{s}': must be of the form 'vYYYY_MM_DD'",
+        .{v},
+    );
+    const month = std.fmt.parseInt(u8, v[6..8], 10) catch std.debug.panic(
+        "bad force-version '{s}': invalid month '{s}'",
+        .{ v, v[6..8] },
+    );
+    if (month < 1 or month > 12) std.debug.panic(
+        "base force-version '{s}': invalid month '{s}'",
+        .{ v, v[6..8] },
+    );
+    const day = std.fmt.parseInt(u8, v[9..11], 10) catch std.debug.panic(
+        "bad force-version '{s}': invalid day '{s}'",
+        .{ v, v[9..11] },
+    );
+    if (day < 1 or day > 31) std.debug.panic(
+        "bad force-version '{s}': invalid day '{s}'",
+        .{ v, v[9..11] },
+    );
+    var result: [11]u8 = undefined;
+    @memcpy(&result, v);
+    return result;
 }
 
 fn makeCalVersion() ![11]u8 {
