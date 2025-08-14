@@ -75,7 +75,6 @@ pub fn build(b: *std.Build) !void {
         });
         setBuildOptions(b, exe, .zls);
         const install = b.addInstallArtifact(exe, .{});
-        b.getInstallStep().dependOn(&install.step);
 
         const run = b.addRunArtifact(exe);
         run.step.dependOn(&install.step);
