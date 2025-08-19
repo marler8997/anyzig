@@ -466,6 +466,12 @@ pub fn main() !void {
     const versioned_exe = try global_cache_directory.joinZ(arena, &.{ hash.path(), exe_str });
     defer arena.free(versioned_exe);
 
+    // If we just downloaded the version and there are no additional arguments,
+    // assume user wanted to do this and exit more gracefully
+    if (maybe_hash == null and argv_index >= all_args.len) {
+        std.process.exit(0);
+    }
+
     const stay_alive = is_init or (builtin.os.tag == .windows);
 
     if (stay_alive) {
