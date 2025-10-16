@@ -150,13 +150,13 @@ fn anyzigLog(
 
 const Extent = struct { start: usize, limit: usize };
 
-fn extractMinZigVersion(zon: []const u8) !?Extent {
+fn extractMinZigVersion(zon: []const u8) ?Extent {
     return extractZigVersion(zon, ".minimum_zig_version");
 }
-fn extractMachZigVersion(zon: []const u8) !?Extent {
+fn extractMachZigVersion(zon: []const u8) ?Extent {
     return extractZigVersion(zon, ".mach_zig_version");
 }
-fn extractZigVersion(zon: []const u8, needle: []const u8) !?Extent {
+fn extractZigVersion(zon: []const u8, needle: []const u8) ?Extent {
     var offset: usize = 0;
     while (true) {
         offset = skipWhitespaceAndComments(zon, offset);
@@ -249,7 +249,7 @@ fn determineSemanticVersion(scratch: Allocator, build_root: BuildRoot) !Semantic
     };
     defer scratch.free(zon);
 
-    if (try extractMachZigVersion(zon)) |version_extent| {
+    if (extractMachZigVersion(zon)) |version_extent| {
         const version = zon[version_extent.start..version_extent.limit];
         if (!std.mem.endsWith(u8, version, "-mach")) errExit(
             "expected the .mach_zig_version value to end with '-mach' but got '{s}'",
@@ -265,7 +265,7 @@ fn determineSemanticVersion(scratch: Allocator, build_root: BuildRoot) !Semantic
         );
     }
 
-    const version_extent = try extractMinZigVersion(zon) orelse errExit(
+    const version_extent = extractMinZigVersion(zon) orelse errExit(
         "build.zig.zon is missing minimum_zig_version, either add it or run '{s} VERSION' to specify a version",
         .{@tagName(build_options.exe)},
     );
@@ -504,7 +504,7 @@ pub fn main() !void {
             , .{semantic_version});
             return;
         };
-        const version_extent = try extractMinZigVersion(zon) orelse {
+        const version_extent = extractMinZigVersion(zon) orelse {
             if (!std.mem.startsWith(u8, zon, ".{")) @panic("zon file did not start with '.{'");
             if (zon.len < 2 or zon[2] != '\n') @panic("zon file not start with '.{\\n");
             const f = try std.fs.cwd().createFile("build.zig.zon", .{});
