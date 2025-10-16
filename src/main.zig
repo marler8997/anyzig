@@ -150,12 +150,10 @@ fn anyzigLog(
 
 const Extent = struct { start: usize, limit: usize };
 
-fn extractMinZigVersion(zon: []const u8) ?Extent {
-    return extractZigVersion(zon, ".minimum_zig_version");
-}
-fn extractMachZigVersion(zon: []const u8) ?Extent {
-    return extractZigVersion(zon, ".mach_zig_version");
-}
+const key_minimum_zig_version = ".minimum_zig_version";
+const key_zig_version = ".zig_version";
+const key_mach_zig_version = ".mach_zig_version";
+
 fn extractZigVersion(zon: []const u8, needle: []const u8) ?Extent {
     var offset: usize = 0;
     while (true) {
@@ -249,34 +247,34 @@ fn determineSemanticVersion(scratch: Allocator, build_root: BuildRoot) !Semantic
     };
     defer scratch.free(zon);
 
-    if (extractMachZigVersion(zon)) |version_extent| {
+    for ([_][]const u8{
+        key_mach_zig_version,
+        key_zig_version,
+        key_minimum_zig_version,
+    }) |key_version| {
+        const version_extent = extractZigVersion(zon, key_version) orelse continue;
         const version = zon[version_extent.start..version_extent.limit];
-        if (!std.mem.endsWith(u8, version, "-mach")) errExit(
-            "expected the .mach_zig_version value to end with '-mach' but got '{s}'",
-            .{version},
-        );
+
+        if (key_version.ptr == key_mach_zig_version.ptr) {
+            if (!std.mem.endsWith(u8, version, "-mach")) errExit(
+                "expected the " ++ key_mach_zig_version ++ " to end with '-mach' but got '{s}'",
+                .{version},
+            );
+        }
+
         log.info(
-            "zig mach version '{s}' pulled from '{}build.zig.zon'",
-            .{ version, build_root.directory },
+            "{s} '{s}' pulled from '{}build.zig.zon'",
+            .{ key_version, version, build_root.directory },
         );
         return SemanticVersion.parse(version) orelse errExit(
-            "{}build.zig.zon has invalid .mach_zig_version \"{s}\"",
-            .{ build_root.directory, version },
+            "{}build.zig.zon has invalid {s} \"{s}\"",
+            .{ build_root.directory, key_version, version },
         );
     }
 
-    const version_extent = extractMinZigVersion(zon) orelse errExit(
+    errExit(
         "build.zig.zon is missing minimum_zig_version, either add it or run '{s} VERSION' to specify a version",
         .{@tagName(build_options.exe)},
-    );
-    const minimum_zig_version = zon[version_extent.start..version_extent.limit];
-    log.info(
-        "zig version '{s}' pulled from '{}build.zig.zon'",
-        .{ minimum_zig_version, build_root.directory },
-    );
-    return SemanticVersion.parse(minimum_zig_version) orelse errExit(
-        "{}build.zig.zon has invalid .minimum_zig_version \"{s}\"",
-        .{ build_root.directory, minimum_zig_version },
     );
 
     // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
@@ -504,7 +502,7 @@ pub fn main() !void {
             , .{semantic_version});
             return;
         };
-        const version_extent = extractMinZigVersion(zon) orelse {
+        const version_extent = extractZigVersion(zon, key_minimum_zig_version) orelse {
             if (!std.mem.startsWith(u8, zon, ".{")) @panic("zon file did not start with '.{'");
             if (zon.len < 2 or zon[2] != '\n') @panic("zon file not start with '.{\\n");
             const f = try std.fs.cwd().createFile("build.zig.zon", .{});

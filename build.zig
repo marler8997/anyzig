@@ -413,6 +413,25 @@ fn addTests(
         const write_files = b.addWriteFiles();
         _ = write_files.add("build.zig", "");
         _ = write_files.add("build.zig.zon",
+            \\.{
+            \\    .minimum_zig_version = "0.13.0",
+            \\    .zig_version = "0.14.0",
+            \\}
+            \\
+        );
+        const t = test_factory.add(.{
+            .name = "test-zig-version",
+            .input_dir = .{ .path = write_files.getDirectory() },
+            .options = .nosetup,
+            .args = &.{"version"},
+        });
+        t.run.expectStdOutEqual("0.14.0\n");
+    }
+
+    {
+        const write_files = b.addWriteFiles();
+        _ = write_files.add("build.zig", "");
+        _ = write_files.add("build.zig.zon",
             \\// example comment
             \\.{
             \\    .minimum_zig_version = "0.13.0",
