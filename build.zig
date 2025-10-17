@@ -186,7 +186,9 @@ fn addTests(
         const run = b.addRunArtifact(anyzig);
         run.setName("anyzig -no-command");
         run.addArg("-no-command");
-        run.expectStdErrEqual("error: expected a command but got '-no-command'\n");
+        // The app should exit with an error code and at least mention what you passed in.
+        run.addCheck(.{ .expect_term = std.process.Child.Term{ .Exited = 1 } });
+        run.addCheck(.{ .expect_stderr_match = "-no-command" });
         test_step.dependOn(&run.step);
     }
 
