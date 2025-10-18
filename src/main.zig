@@ -53,10 +53,14 @@ const global = struct {
 
     fn getAppDataDir() ![]const u8 {
         if (cached_app_data_dir == null) {
-            cached_app_data_dir = if (std.fs.getAppDataDir(arena, "anyzig")) |dir|
-                .{ .ok = dir }
-            else |e|
-                .{ .err = e };
+            const app_data_dir = blk: {
+                if (std.process.getEnvVarOwned(arena, "ANYZIG_DATA_DIR")) |custom_dir| {
+                    break :blk custom_dir;
+                } else |_| {
+                    break :blk try std.fs.getAppDataDir(arena, "anyzig");
+                }
+            };
+            cached_app_data_dir = .{ .ok = app_data_dir };
         }
         return switch (cached_app_data_dir.?) {
             .ok => |d| d,
@@ -376,7 +380,7 @@ pub fn main() !void {
         break :blk .{ .{ .semantic = try determineSemanticVersion(arena, build_root) }, false };
     };
 
-    const app_data_path = try std.fs.getAppDataDir(arena, "anyzig");
+    const app_data_path = try global.getAppDataDir();
     defer arena.free(app_data_path);
     log.info("appdata '{s}'", .{app_data_path});
 
@@ -412,7 +416,13 @@ pub fn main() !void {
 
     const override_global_cache_dir: ?[]const u8 = try EnvVar.ZIG_GLOBAL_CACHE_DIR.get(arena);
     var global_cache_directory: Directory = l: {
-        const p = override_global_cache_dir orelse try introspect.resolveGlobalCacheDir(arena);
+        const p = if (override_global_cache_dir) |dir| dir else blk: {
+            if (std.process.getEnvVarOwned(arena, "ANYZIG_DATA_DIR")) |custom_data_dir| {
+                break :blk try std.fs.path.join(arena, &.{ custom_data_dir, "zig" });
+            } else |_| {
+                break :blk try introspect.resolveGlobalCacheDir(arena);
+            }
+        };
         break :l .{
             .handle = try fs.cwd().makeOpenPath(p, .{}),
             .path = p,
