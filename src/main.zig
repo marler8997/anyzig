@@ -338,13 +338,6 @@ pub fn main() !void {
 
     const version_specifier: VersionSpecifier, const is_init = blk: {
         if (maybe_command) |command| {
-            if (std.mem.startsWith(u8, command, "-") and !std.mem.eql(u8, command, "-h") and !std.mem.eql(u8, command, "--help")) {
-                try std.io.getStdErr().writer().print(
-                    "error: expected a command but got '{s}'\n",
-                    .{command},
-                );
-                std.process.exit(0xff);
-            }
             if (build_options.exe == .zig and (std.mem.eql(u8, command, "init") or std.mem.eql(u8, command, "init-exe") or std.mem.eql(u8, command, "init-lib"))) {
                 const is_help = blk_is_help: {
                     var index: usize = cmdline_offset + 1;
@@ -479,7 +472,7 @@ pub fn main() !void {
         try child.spawn();
         const result = try child.wait();
         switch (result) {
-            .Exited => |code| if (code != 0) std.process.exit(0xff),
+            .Exited => |code| if (code != 0) std.process.exit(code),
             else => std.process.exit(0xff),
         }
     }
@@ -878,11 +871,23 @@ fn getVersionUrl(
     app_data_path: []const u8,
     semantic_version: SemanticVersion,
 ) !DownloadUrl {
-    if (build_options.exe == .zls) return DownloadUrl.initOfficial(std.fmt.allocPrint(
-        arena,
-        "https://builds.zigtools.org/zls-{s}-{}.{s}",
-        .{ os_arch, semantic_version, archive_ext },
-    ) catch |e| oom(e));
+    if (build_options.exe == .zls) {
+        const info_url = try std.fmt.allocPrint(arena, "https://releases.zigtools.org/v1/zls/select-version?compatibility=only-runtime&zig_version={}", .{semantic_version});
+        const info_uri = try std.Uri.parse(info_url);
+        const info_basename = try std.fmt.allocPrint(arena, "download-index-zls-{}.json", .{semantic_version});
+        const index_path = try std.fs.path.join(arena, &.{ app_data_path, info_basename });
+
+        try fetchFile(arena, info_url, info_uri, index_path);
+        const index_content = blk: {
+            // since we just downloaded the file, this should always succeed now
+            const file = try std.fs.cwd().openFile(index_path, .{});
+            defer file.close();
+            break :blk try file.readToEndAlloc(arena, std.math.maxInt(usize));
+        };
+        defer arena.free(index_content);
+
+        return extractUrlFromZlsDownloadIndex(arena, index_path, index_content);
+    }
 
     if (!isMachVersion(semantic_version)) return makeOfficialUrl(arena, semantic_version);
 
@@ -940,6 +945,45 @@ fn extractMasterVersion(
         "unable to parse download index master version '{s}'",
         .{version_val.string},
     );
+}
+
+fn extractUrlFromZlsDownloadIndex(
+    allocator: std.mem.Allocator,
+    index_filepath: []const u8,
+    download_index: []const u8,
+) DownloadUrl {
+    const root = std.json.parseFromSlice(std.json.Value, allocator, download_index, .{
+        .allocate = .alloc_if_needed,
+    }) catch |e| std.debug.panic(
+        "failed to parse download index '{s}' as JSON with {s}\n{s}",
+        .{ index_filepath, @errorName(e), download_index },
+    );
+    defer root.deinit();
+    if (root.value != .object) std.debug.panic(
+        "zls index root value is not an object\n{s}",
+        .{download_index},
+    );
+    const arch_os_obj = root.value.object.get(arch_os) orelse std.debug.panic(
+        "zls index does not contain an entry for arch-os '{s}'\n{s}",
+        .{ arch_os, download_index },
+    );
+    const fetch_url = arch_os_obj.object.get("tarball") orelse std.debug.panic(
+        "zls index arch-os '{s}' is missing the 'tarball' property\n{s}",
+        .{ arch_os, download_index },
+    );
+    if (fetch_url != .string) std.debug.panic(
+        "zls index arch-os '{s}' tarball property is not a string\n{s}",
+        .{ arch_os, download_index },
+    );
+    const shasum_url = arch_os_obj.object.get("shasum") orelse std.debug.panic(
+        "zls index arch-os '{s}' is missing the 'shasum' property\n{s}",
+        .{ arch_os, download_index },
+    );
+    _ = shasum_url; // TODO: verify shasum
+    return .{
+        .fetch = allocator.dupe(u8, fetch_url.string) catch |e| oom(e),
+        .official = allocator.dupe(u8, fetch_url.string) catch |e| oom(e),
+    };
 }
 
 fn extractUrlFromMachDownloadIndex(
