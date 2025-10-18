@@ -472,7 +472,7 @@ pub fn main() !void {
         try child.spawn();
         const result = try child.wait();
         switch (result) {
-            .Exited => |code| if (code != 0) std.process.exit(0xff),
+            .Exited => |code| if (code != 0) std.process.exit(code),
             else => std.process.exit(0xff),
         }
     }
