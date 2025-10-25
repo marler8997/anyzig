@@ -338,6 +338,13 @@ pub fn main() !void {
 
     const version_specifier: VersionSpecifier, const is_init = blk: {
         if (maybe_command) |command| {
+            if (std.mem.startsWith(u8, command, "-") and !std.mem.eql(u8, command, "-h") and !std.mem.eql(u8, command, "--help")) {
+                try std.io.getStdErr().writer().print(
+                    "error: expected a command but got '{s}'\n",
+                    .{command},
+                );
+                std.process.exit(0xff);
+            }
             if (build_options.exe == .zig and (std.mem.eql(u8, command, "init") or std.mem.eql(u8, command, "init-exe") or std.mem.eql(u8, command, "init-lib"))) {
                 const is_help = blk_is_help: {
                     var index: usize = cmdline_offset + 1;
@@ -472,7 +479,7 @@ pub fn main() !void {
         try child.spawn();
         const result = try child.wait();
         switch (result) {
-            .Exited => |code| if (code != 0) std.process.exit(code),
+            .Exited => |code| if (code != 0) std.process.exit(0xff),
             else => std.process.exit(0xff),
         }
     }
