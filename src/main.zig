@@ -875,16 +875,73 @@ fn makeOfficialUrl(arena: Allocator, semantic_version: SemanticVersion) Download
     };
 }
 
+fn findZlsTarball(arena: Allocator, zig_version: SemanticVersion) ![]const u8 {
+    var client = std.http.Client{ .allocator = arena };
+    defer client.deinit();
+    try client.initDefaultProxies(arena);
+
+    const api_url = std.fmt.allocPrint(
+        arena,
+        "https://releases.zigtools.org/v1/zls/select-version?zig_version={}&compatibility=only-runtime",
+        .{zig_version},
+    ) catch |e| oom(e);
+    defer arena.free(api_url);
+
+    var header_buffer: [4096]u8 = undefined;
+    var request = client.open(.GET, std.Uri.parse(api_url) catch |err| return err, .{
+        .server_header_buffer = &header_buffer,
+    }) catch |err| return err;
+    defer request.deinit();
+
+    try request.send();
+    try request.wait();
+
+    const status = request.response.status;
+
+    const body = try request.reader().readAllAlloc(arena, std.math.maxInt(usize));
+    defer arena.free(body);
+
+    if (status.class() != .success) {
+        return errExit("zls: HTTP {} from zigtools: {s}", .{ @intFromEnum(status), body });
+    }
+
+    var parsed = std.json.parseFromSlice(std.json.Value, arena, body, .{ .allocate = .alloc_if_needed }) catch |e| std.debug.panic(
+        "failed to parse zigtools releases response as JSON with {s}",
+        .{@errorName(e)},
+    );
+    defer parsed.deinit();
+
+    const obj = parsed.value.object;
+    if (obj.get("message")) |msg| {
+        return errExit("zls: {s}", .{msg.string});
+    }
+
+    // Prefer ARCH-OS key, fallback to OS-ARCH
+    const tarball = blk: {
+        if (obj.get(arch_os)) |entry| {
+            if (entry.object.get("tarball")) |t| break :blk t.string;
+        }
+        if (obj.get(os_arch)) |entry| {
+            if (entry.object.get("tarball")) |t| break :blk t.string;
+        }
+        return errExit(
+            "zls build not found for {} (no artifact for '{s}' or '{s}')",
+            .{ zig_version, arch_os, os_arch },
+        );
+    };
+
+    log.debug("zls tarball '{s}'", .{tarball});
+
+    return try arena.dupe(u8, tarball);
+}
+
 fn getVersionUrl(
     arena: Allocator,
     app_data_path: []const u8,
     semantic_version: SemanticVersion,
 ) !DownloadUrl {
-    if (build_options.exe == .zls) return DownloadUrl.initOfficial(std.fmt.allocPrint(
-        arena,
-        "https://builds.zigtools.org/zls-{s}-{}.{s}",
-        .{ os_arch, semantic_version, archive_ext },
-    ) catch |e| oom(e));
+    if (build_options.exe == .zls)
+        return DownloadUrl.initOfficial(try findZlsTarball(arena, semantic_version));
 
     if (!isMachVersion(semantic_version)) return makeOfficialUrl(arena, semantic_version);
 
