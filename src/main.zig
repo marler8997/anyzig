@@ -436,7 +436,6 @@ pub fn main() !void {
         }
 
         var url = try getVersionUrl(arena, app_data_path, semantic_version);
-        defer url.deinit(arena);
 
         const fetchinfo: ?FetchInfo = if (!std.mem.startsWith(u8, url.fetch, "https://ziglang.org"))
             null
