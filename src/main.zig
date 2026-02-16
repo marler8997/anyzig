@@ -442,17 +442,21 @@ pub fn main() !void {
         const url = try getVersionUrl(arena, app_data_path, semantic_version);
         defer url.deinit(arena);
 
-        // TODO: retries
         const zig_archive_filename = url.fetch[std.mem.lastIndexOfScalar(u8, url.fetch, '/').? + 1 ..];
-        const fetchinfo = try FetchInfo.init(gpa, app_data_path, mirrors.list.items[0], zig_archive_filename);
+        var fetchinfo: FetchInfo = undefined;
+        var fetch_successful: bool = false;
+        for (mirrors.list.items) |mirror_url| {
+            fetchinfo = try FetchInfo.init(gpa, app_data_path, mirror_url, zig_archive_filename);
+            errdefer fetchinfo.deinit(gpa);
+            fetchinfo.fetchAndValidate(gpa) catch continue;
+            fetch_successful = true;
+            break;
+        }
+        if (!fetch_successful) {
+            std.log.err("ran out of mirrors for: {s}", .{zig_archive_filename});
+            return error.NoMoreMirrors;
+        }
         defer fetchinfo.deinit(gpa);
-
-        defer std.fs.cwd().deleteFile(fetchinfo.archive_path) catch {};
-        try fetchFile(arena, fetchinfo.archive_url, try std.Uri.parse(fetchinfo.archive_url), fetchinfo.archive_path);
-        defer std.fs.cwd().deleteFile(fetchinfo.minisign_path) catch {};
-        try fetchFile(arena, fetchinfo.minisign_url, try std.Uri.parse(fetchinfo.minisign_url), fetchinfo.minisign_path);
-
-        try fetchinfo.validateMinisign(gpa);
 
         const hash = hashAndPath(try cmdFetch(
             gpa,
@@ -910,7 +914,9 @@ const FetchInfo = struct {
             filename,
         });
         errdefer gpa.free(minisign_url);
-        const minisign_filename = try std.mem.concat(gpa, u8, &.{ filename, ".minisig" });
+        var rand = std.Random.DefaultPrng.init(@bitCast(std.time.timestamp()));
+
+        const minisign_filename = try std.fmt.allocPrint(gpa, "tmp-{x}-{s}{s}", .{ rand.random().int(u32), filename, ".minisig" });
         defer gpa.free(minisign_filename);
 
         const minisign_path = try std.fs.path.join(gpa, &.{
@@ -923,6 +929,25 @@ const FetchInfo = struct {
             .minisign_path = minisign_path,
             .archive_path = minisign_path[0 .. minisign_path.len - ".minisig".len],
         };
+    }
+
+    fn deinit(self: @This(), gpa: Allocator) void {
+        std.fs.cwd().deleteFile(self.archive_path) catch {};
+        std.fs.cwd().deleteFile(self.minisign_path) catch {};
+        gpa.free(self.archive_url);
+        gpa.free(self.minisign_url);
+        gpa.free(self.minisign_path);
+        // do not free archive_path here, since its a slice of minisign_path
+    }
+
+    fn fetchAndValidate(self: @This(), gpa: Allocator) !void {
+        var arena = std.heap.ArenaAllocator.init(gpa);
+        defer arena.deinit();
+
+        try fetchFile(arena.allocator(), self.archive_url, try std.Uri.parse(self.archive_url), self.archive_path);
+        try fetchFile(arena.allocator(), self.minisign_url, try std.Uri.parse(self.minisign_url), self.minisign_path);
+
+        try self.validateMinisign(gpa);
     }
 
     const zig_org_minisign_pubkey = minizign.PublicKey.decodeFromBase64("RWSGOq2NVecA2UPNdBUZykf1CCb147pkmdtYxgb3Ti+JO/wCYvhbAb/U") catch unreachable;
@@ -942,13 +967,6 @@ const FetchInfo = struct {
             sig,
             null,
         );
-    }
-
-    fn deinit(self: @This(), gpa: Allocator) void {
-        gpa.free(self.archive_url);
-        gpa.free(self.minisign_url);
-        gpa.free(self.minisign_path);
-        // do not free archive_path here, since its a slice of minisign_path
     }
 };
 
