@@ -438,10 +438,15 @@ pub fn main() !void {
         var url = try getVersionUrl(arena, app_data_path, semantic_version);
         defer url.deinit(arena);
 
-        const fetchinfo: ?FetchInfo = if (std.mem.startsWith(u8, url.fetch, "https://ziglang.org")) fetchinfo: {
+        const fetchinfo: ?FetchInfo = if (!std.mem.startsWith(u8, url.fetch, "https://ziglang.org"))
+            null
+        else fetchinfo: {
             var mirrors = try MirrorUrls.get(gpa, app_data_path);
             defer mirrors.deinit(gpa);
-            assert(mirrors.list.items.len > 0);
+            if (mirrors.list.items.len == 0) {
+                log.err("no zig mirrors found.", .{});
+                break :fetchinfo null;
+            }
 
             const zig_archive_filename = url.fetch[std.mem.lastIndexOfScalar(u8, url.fetch, '/').? + 1 ..];
 
@@ -449,7 +454,8 @@ pub fn main() !void {
             const fi = try mirrors.fetchFromAny(gpa, download_path, zig_archive_filename);
             url.fetch = fi.archive_path;
             break :fetchinfo fi;
-        } else null;
+        };
+
         defer {
             if (fetchinfo) |fi| fi.deinit(gpa);
         }
