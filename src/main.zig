@@ -923,8 +923,14 @@ const FetchInfo = struct {
     }
 
     fn deinit(self: @This(), gpa: Allocator) void {
-        std.fs.cwd().deleteFile(self.archive_path) catch {};
-        std.fs.cwd().deleteFile(self.minisign_path) catch {};
+        std.fs.cwd().deleteFile(self.archive_path) catch |err| switch (err) {
+            error.FileNotFound => {},
+            else => std.log.err("remove '{s}' failed with {s}", .{ self.archive_path, @errorName(err) }),
+        };
+        std.fs.cwd().deleteFile(self.minisign_path) catch |err| switch (err) {
+            error.FileNotFound => {},
+            else => std.log.err("remove '{s}' failed with {s}", .{ self.archive_path, @errorName(err) }),
+        };
         gpa.free(self.archive_url);
         gpa.free(self.minisign_url);
         gpa.free(self.minisign_path);
