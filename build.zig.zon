@@ -12,6 +12,10 @@
             .url = "git+https://github.com/marler8997/zipcmdline#3dfca786a489d117e4b72ea10ffb4bbd9fc2dd72",
             .hash = "12201a08d7eff7619c8eb8284691a3ff959861b4bdd87216f180ed136672fb4ea26f",
         },
+        .minizign = .{
+            .url = "git+https://github.com/jedisct1/zig-minisign.git#50af1aa2ca0a4635e742b0a83735bccc3052b932",
+            .hash = "minizign-0.1.7-gg18cWlFAgBHo9NOoJiCzEn3dgmdE2bpWfQOuVipDhsk",
+        },
     },
     .paths = .{
         "build.zig",

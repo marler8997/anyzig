@@ -6,6 +6,8 @@ const Exe = enum { zig, zls };
 
 pub fn build(b: *std.Build) !void {
     const zig_dep = b.dependency("zig", .{});
+    const minizign_dep = b.dependency("minizign", .{});
+    const minizign_mod = minizign_dep.module("minizign");
 
     const version_option: ?[11]u8 = if (b.option(
         []const u8,
@@ -47,6 +49,7 @@ pub fn build(b: *std.Build) !void {
                 .single_threaded = true,
                 .imports = &.{
                     .{ .name = "zig", .module = zig_mod },
+                    .{ .name = "minizign", .module = minizign_mod },
                     .{ .name = "version", .module = dev_version_embed },
                 },
             }),
@@ -106,7 +109,7 @@ pub fn build(b: *std.Build) !void {
     ci_step.dependOn(test_step);
     ci_step.dependOn(&install_version_release_file.step);
 
-    try ci(b, &release_version, release_version_embed, zig_mod, ci_step, host_zip_exe);
+    try ci(b, &release_version, release_version_embed, zig_mod, minizign_mod, ci_step, host_zip_exe);
 }
 
 fn verifyForceVersion(v: []const u8) [11]u8 {
@@ -593,6 +596,7 @@ fn ci(
     release_version: []const u8,
     release_version_embed: *std.Build.Module,
     zig_mod: *std.Build.Module,
+    minizign_mod: *std.Build.Module,
     ci_step: *std.Build.Step,
     host_zip_exe: *std.Build.Step.Compile,
 ) !void {
@@ -633,6 +637,7 @@ fn ci(
                 .single_threaded = true,
                 .imports = &.{
                     .{ .name = "zig", .module = zig_mod },
+                    .{ .name = "minizign", .module = minizign_mod },
                     .{ .name = "version", .module = release_version_embed },
                 },
             }),

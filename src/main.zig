@@ -17,6 +17,7 @@ const Directory = std.Build.Cache.Directory;
 const EnvVar = std.zig.EnvVar;
 
 const zig = @import("zig");
+const minizign = @import("minizign");
 
 const Package = zig.Package;
 const introspect = zig.introspect;
