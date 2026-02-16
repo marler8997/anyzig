@@ -1026,22 +1026,16 @@ pub const MirrorUrls = struct {
     }
 
     fn fetchFromAny(self: @This(), gpa: Allocator, tmpdir: []const u8, filename: []const u8) !FetchInfo {
-        var fetchinfo: FetchInfo = undefined;
-        var fetch_successful: bool = false;
         for (self.list.items) |mirror_url| {
-            fetchinfo = try FetchInfo.init(gpa, tmpdir, mirror_url, filename);
+            const fetchinfo = try FetchInfo.init(gpa, tmpdir, mirror_url, filename);
             fetchinfo.fetchAndValidate(gpa) catch {
                 fetchinfo.deinit(gpa);
                 continue;
             };
-            fetch_successful = true;
-            break;
+            return fetchinfo;
         }
-        if (!fetch_successful) {
-            log.err("ran out of mirrors for: {s}", .{filename});
-            return error.NoMoreMirrors;
-        }
-        return fetchinfo;
+        log.err("ran out of mirrors for: {s}", .{filename});
+        return error.NoMoreMirrors;
     }
 
     fn deinit(self: *@This(), gpa: Allocator) void {
@@ -1229,7 +1223,7 @@ fn fetchFile(
         return e;
     };
     request.wait() catch |e| {
-        std.debug.panic(
+        log.err(
             "fetch '{}': wait failed with {s}",
             .{ uri, @errorName(e) },
         );
@@ -1248,7 +1242,7 @@ fn fetchFile(
     defer scratch.free(out_filepath_tmp);
 
     const file = std.fs.cwd().createFile(out_filepath_tmp, .{}) catch |e| {
-        std.log.err(
+        log.err(
             "create '{s}' failed with {s}",
             .{ out_filepath_tmp, @errorName(e) },
         );
@@ -1256,10 +1250,10 @@ fn fetchFile(
     };
     defer {
         if (std.fs.cwd().deleteFile(out_filepath_tmp)) {
-            std.log.info("removed '{s}'", .{out_filepath_tmp});
+            log.info("removed '{s}'", .{out_filepath_tmp});
         } else |err| switch (err) {
             error.FileNotFound => {},
-            else => |e| std.log.err("remove '{s}' failed with {s}", .{ out_filepath_tmp, @errorName(e) }),
+            else => |e| log.err("remove '{s}' failed with {s}", .{ out_filepath_tmp, @errorName(e) }),
         }
         file.close();
     }
@@ -1269,7 +1263,7 @@ fn fetchFile(
         // not sure if it's a problem with the mach server or Zig's HTTP client
         if (request.response.content_length) |content_length| {
             if (std.mem.eql(u8, url_string, DownloadIndexKind.mach.url())) {
-                std.log.warn("ignoring content length {} for mach index", .{content_length});
+                log.warn("ignoring content length {} for mach index", .{content_length});
                 break :blk null;
             }
         }
@@ -1291,10 +1285,13 @@ fn fetchFile(
         total_received += len;
 
         if (maybe_content_length) |content_length| {
-            if (total_received > content_length) errExit(
-                "fetch '{}': read more than Content-Length ({})",
-                .{ uri, content_length },
-            );
+            if (total_received > content_length) {
+                log.err(
+                    "fetch '{}': read more than Content-Length ({})",
+                    .{ uri, content_length },
+                );
+                return error.ContentLengthMismatch;
+            }
         }
         // NOTE: not going through a buffered writer since we're writing
         //       large chunks
