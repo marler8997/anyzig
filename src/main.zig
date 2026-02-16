@@ -443,21 +443,8 @@ pub fn main() !void {
         defer url.deinit(arena);
 
         const zig_archive_filename = url.fetch[std.mem.lastIndexOfScalar(u8, url.fetch, '/').? + 1 ..];
-        var fetchinfo: FetchInfo = undefined;
-        var fetch_successful: bool = false;
-        for (mirrors.list.items) |mirror_url| {
-            fetchinfo = try FetchInfo.init(gpa, app_data_path, mirror_url, zig_archive_filename);
-            fetchinfo.fetchAndValidate(gpa) catch {
-                fetchinfo.deinit(gpa);
-                continue;
-            };
-            fetch_successful = true;
-            break;
-        }
-        if (!fetch_successful) {
-            std.log.err("ran out of mirrors for: {s}", .{zig_archive_filename});
-            return error.NoMoreMirrors;
-        }
+
+        const fetchinfo = try mirrors.fetchFromAny(gpa, app_data_path, zig_archive_filename);
         defer fetchinfo.deinit(gpa);
 
         const hash = hashAndPath(try cmdFetch(
@@ -903,27 +890,29 @@ const FetchInfo = struct {
     archive_path: []const u8,
     minisign_url: []const u8,
     minisign_path: []const u8,
+    const anyzig_mirror_url_query = "source=anyzig/" ++ @embedFile("version");
     fn init(gpa: Allocator, tmpdir: []const u8, mirror_url: []const u8, filename: []const u8) !@This() {
-        const archive_url = try std.fmt.allocPrint(gpa, "{s}{s}{s}?source=anyzig", .{
+        const archive_url = try std.fmt.allocPrint(gpa, "{s}{s}{s}?{s}", .{
             mirror_url,
             if (std.mem.endsWith(u8, mirror_url, "/")) "" else "/",
             filename,
+            anyzig_mirror_url_query,
         });
         errdefer gpa.free(archive_url);
-        const minisign_url = try std.fmt.allocPrint(gpa, "{s}{s}{s}.minisig?source=anyzig", .{
+        const minisign_url = try std.fmt.allocPrint(gpa, "{s}{s}{s}.minisig?{s}", .{
             mirror_url,
             if (std.mem.endsWith(u8, mirror_url, "/")) "" else "/",
             filename,
+            anyzig_mirror_url_query,
         });
         errdefer gpa.free(minisign_url);
-        var rand = std.Random.DefaultPrng.init(@bitCast(std.time.timestamp()));
 
-        const minisign_filename = try std.fmt.allocPrint(gpa, "tmp-{x}-{s}{s}", .{ rand.random().int(u32), filename, ".minisig" });
-        defer gpa.free(minisign_filename);
+        const minisig_filename = try std.fmt.allocPrint(gpa, "tmp-{s}{s}", .{ filename, ".minisig" });
+        defer gpa.free(minisig_filename);
 
         const minisign_path = try std.fs.path.join(gpa, &.{
             tmpdir,
-            minisign_filename,
+            minisig_filename,
         });
         return .{
             .archive_url = archive_url,
@@ -1020,13 +1009,33 @@ pub const MirrorUrls = struct {
 
         var iter = std.mem.splitScalar(u8, mirrors_content, '\n');
         while (iter.next()) |mirror| {
-            if (std.mem.startsWith(u8, mirror, "http")) {
+            const mirror_without_whitespace = std.mem.trim(u8, mirror, &std.ascii.whitespace);
+            if (mirror_without_whitespace.len > 0) {
                 try self.list.append(gpa, try gpa.dupe(u8, mirror));
             }
         }
         var rand = std.Random.DefaultPrng.init(@bitCast(std.time.timestamp()));
         rand.random().shuffle([]const u8, self.list.items);
         return self;
+    }
+
+    fn fetchFromAny(self: @This(), gpa: Allocator, tmpdir: []const u8, filename: []const u8) !FetchInfo {
+        var fetchinfo: FetchInfo = undefined;
+        var fetch_successful: bool = false;
+        for (self.list.items) |mirror_url| {
+            fetchinfo = try FetchInfo.init(gpa, tmpdir, mirror_url, filename);
+            fetchinfo.fetchAndValidate(gpa) catch {
+                fetchinfo.deinit(gpa);
+                continue;
+            };
+            fetch_successful = true;
+            break;
+        }
+        if (!fetch_successful) {
+            log.err("ran out of mirrors for: {s}", .{filename});
+            return error.NoMoreMirrors;
+        }
+        return fetchinfo;
     }
 
     fn deinit(self: *@This(), gpa: Allocator) void {
