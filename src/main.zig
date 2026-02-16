@@ -944,10 +944,29 @@ const FetchInfo = struct {
         var arena = std.heap.ArenaAllocator.init(gpa);
         defer arena.deinit();
 
-        try fetchFile(arena.allocator(), self.archive_url, try std.Uri.parse(self.archive_url), self.archive_path);
-        try fetchFile(arena.allocator(), self.minisign_url, try std.Uri.parse(self.minisign_url), self.minisign_path);
+        fetchFile(
+            arena.allocator(),
+            self.archive_url,
+            try std.Uri.parse(self.archive_url),
+            self.archive_path,
+        ) catch |err| {
+            std.log.err("failed to download archive: {} {s}", .{ err, self.archive_url });
+            return err;
+        };
+        fetchFile(
+            arena.allocator(),
+            self.minisign_url,
+            try std.Uri.parse(self.minisign_url),
+            self.minisign_path,
+        ) catch |err| {
+            std.log.err("failed to download signature: {} {s}", .{ err, self.minisign_url });
+            return err;
+        };
 
-        try self.validateMinisign(gpa);
+        self.validateMinisign(gpa) catch |err| {
+            std.log.err("failed to validate: {} {s}", .{ err, self.archive_url });
+            return err;
+        };
     }
 
     const zig_org_minisign_pubkey = minizign.PublicKey.decodeFromBase64("RWSGOq2NVecA2UPNdBUZykf1CCb147pkmdtYxgb3Ti+JO/wCYvhbAb/U") catch unreachable;
@@ -1327,7 +1346,7 @@ pub fn cmdFetch(
     };
     defer fetch.deinit();
 
-    log.info("downloading '{s}'...", .{url});
+    log.info("cacheing '{s}'...", .{url});
     fetch.run() catch |err| switch (err) {
         error.OutOfMemory => errExit("out of memory", .{}),
         error.FetchFailed => {}, // error bundle checked below
