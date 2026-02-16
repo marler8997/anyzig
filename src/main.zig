@@ -434,19 +434,29 @@ pub fn main() !void {
                 else => |e| return e,
             }
         }
+        // TODO: cache mirror list
+        var mirrors = try MirrorUrls.get(gpa, app_data_path);
+        defer mirrors.deinit(gpa);
+        assert(mirrors.list.items.len > 0);
 
         const url = try getVersionUrl(arena, app_data_path, semantic_version);
         defer url.deinit(arena);
 
-        const filename = url.fetch[std.mem.lastIndexOfScalar(u8, url.fetch, '/').? + 1 ..];
-        const mirror_url = try MirrorUrls.getUrl(arena, app_data_path, filename);
-        // log.info("{f}", .{std.json.fmt(mirror_urls.list.items, .{ .whitespace = .indent_4 })});
+        // TODO: retries
+        const zig_archive_filename = url.fetch[std.mem.lastIndexOfScalar(u8, url.fetch, '/').? + 1 ..];
+        const mirror = try FetchInfo.init(gpa, app_data_path, mirrors.list.items[0], zig_archive_filename);
+        defer mirror.deinit(gpa);
+
+        defer std.fs.cwd().deleteFile(mirror.archive_path) catch {};
+        try fetchFile(arena, mirror.archive_url, try std.Uri.parse(mirror.archive_url), mirror.archive_path);
+
+        // TODO: download and verify minizign signature
 
         const hash = hashAndPath(try cmdFetch(
             gpa,
             arena,
             global_cache_directory,
-            mirror_url,
+            mirror.archive_path,
             .{ .debug_hash = false },
         ));
 
@@ -880,51 +890,90 @@ fn makeOfficialUrl(arena: Allocator, semantic_version: SemanticVersion) Download
     };
 }
 
-pub const MirrorUrls = struct {
-    list: std.ArrayListUnmanaged([]const u8) = .empty,
-    pub const mirrorlist = struct {
-        pub const url = "https://ziglang.org/download/community-mirrors.txt";
-        pub const uri = std.Uri.parse(url) catch unreachable;
-    };
-
-    fn getUrl(
-        arena: Allocator,
-        app_data_path: []const u8,
-        filename: []const u8,
-    ) ![]const u8 {
-        const self = try get(arena, app_data_path);
-        assert(self.list.items.len > 0);
-        return std.fmt.allocPrint(arena, "{s}{s}{s}?source=anyzig", .{
-            self.list.items[0],
-            if (std.mem.endsWith(u8, self.list.items[0], "/")) "" else "/",
+const FetchInfo = struct {
+    archive_url: []const u8,
+    archive_path: []const u8,
+    minisign_url: []const u8,
+    minisign_path: []const u8,
+    fn init(gpa: Allocator, tmpdir: []const u8, mirror_url: []const u8, filename: []const u8) !@This() {
+        const archive_url = try std.fmt.allocPrint(gpa, "{s}{s}{s}?source=anyzig", .{
+            mirror_url,
+            if (std.mem.endsWith(u8, mirror_url, "/")) "" else "/",
             filename,
         });
+        errdefer gpa.free(archive_url);
+        const minisign_url = try std.fmt.allocPrint(gpa, "{s}{s}{s}.minisig?source=anyzig", .{
+            mirror_url,
+            if (std.mem.endsWith(u8, mirror_url, "/")) "" else "/",
+            filename,
+        });
+        errdefer gpa.free(minisign_url);
+        const minisign_filename = try std.mem.concat(gpa, u8, &.{ filename, ".minisig" });
+        defer gpa.free(minisign_filename);
+
+        const minisign_path = try std.fs.path.join(gpa, &.{
+            tmpdir,
+            minisign_filename,
+        });
+        return .{
+            .archive_url = archive_url,
+            .minisign_url = minisign_url,
+            .minisign_path = minisign_path,
+            .archive_path = minisign_path[0 .. minisign_path.len - ".minisig".len],
+        };
     }
 
+    fn deinit(self: @This(), gpa: Allocator) void {
+        gpa.free(self.archive_url);
+        gpa.free(self.minisign_url);
+        gpa.free(self.minisign_path);
+        // do not free archive_path here, since its a slice of minisign_path
+    }
+};
+
+pub const MirrorUrls = struct {
+    list: std.ArrayListUnmanaged([]const u8) = .empty,
+    const mirrorlist = struct {
+        const url = "https://ziglang.org/download/community-mirrors.txt";
+        const uri = std.Uri.parse(url) catch unreachable;
+    };
+
     fn get(
-        arena: Allocator,
-        app_data_path: []const u8,
+        gpa: Allocator,
+        tmpdir: []const u8,
     ) !@This() {
-        const mirrors_path = try std.fs.path.join(arena, &.{ app_data_path, "community-mirrors.txt" });
+        const mirrors_path = try std.fs.path.join(gpa, &.{ tmpdir, "community-mirrors.txt" });
+        defer gpa.free(mirrors_path);
         var self: @This() = .{};
 
-        try fetchFile(arena, mirrorlist.url, mirrorlist.uri, mirrors_path);
+        var arena = std.heap.ArenaAllocator.init(gpa);
+        defer arena.deinit();
+        try fetchFile(arena.allocator(), mirrorlist.url, mirrorlist.uri, mirrors_path);
 
         const mirrors_content = blk: {
             // since we just downloaded the file, this should always succeed now
             const file = try std.fs.cwd().openFile(mirrors_path, .{});
             defer file.close();
-            break :blk try file.readToEndAlloc(arena, std.math.maxInt(usize));
+            break :blk try file.readToEndAlloc(gpa, std.math.maxInt(usize));
         };
+        defer gpa.free(mirrors_content);
+
         var iter = std.mem.splitScalar(u8, mirrors_content, '\n');
         while (iter.next()) |mirror| {
             if (std.mem.startsWith(u8, mirror, "http")) {
-                try self.list.append(arena, mirror);
+                try self.list.append(gpa, try gpa.dupe(u8, mirror));
             }
         }
         var rand = std.Random.DefaultPrng.init(@bitCast(std.time.timestamp()));
         rand.random().shuffle([]const u8, self.list.items);
         return self;
+    }
+
+    fn deinit(self: *@This(), gpa: Allocator) void {
+        for (self.list.items) |mirror| {
+            gpa.free(mirror);
+        }
+        self.list.deinit(gpa);
     }
 };
 
@@ -1071,7 +1120,7 @@ fn fetchFile(
 
     const progress_node_name = std.fmt.allocPrint(scratch, "fetch {s}", .{uri}) catch |e| oom(e);
     defer scratch.free(progress_node_name);
-    const node = root.start(progress_node_name, 1);
+    const node = root.start(progress_node_name, 0);
     defer node.end();
 
     const lock_filepath = try std.mem.concat(scratch, u8, &.{ out_filepath, ".lock" });
