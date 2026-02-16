@@ -434,7 +434,6 @@ pub fn main() !void {
                 else => |e| return e,
             }
         }
-        // TODO: cache mirror list
         var mirrors = try MirrorUrls.get(gpa, app_data_path);
         defer mirrors.deinit(gpa);
         assert(mirrors.list.items.len > 0);
@@ -997,17 +996,19 @@ pub const MirrorUrls = struct {
         gpa: Allocator,
         tmpdir: []const u8,
     ) !@This() {
-        const mirrors_path = try std.fs.path.join(gpa, &.{ tmpdir, "community-mirrors.txt" });
-        defer gpa.free(mirrors_path);
+        const mirrorlist_path = try std.fs.path.join(gpa, &.{ tmpdir, "community-mirrors.txt" });
+        defer gpa.free(mirrorlist_path);
         var self: @This() = .{};
 
         var arena = std.heap.ArenaAllocator.init(gpa);
         defer arena.deinit();
-        try fetchFile(arena.allocator(), mirrorlist.url, mirrorlist.uri, mirrors_path);
+        fetchFile(arena.allocator(), mirrorlist.url, mirrorlist.uri, mirrorlist_path) catch {
+            log.err("failed to fetch mirrorlist to: {s}", .{mirrorlist_path});
+        };
 
         const mirrors_content = blk: {
-            // since we just downloaded the file, this should always succeed now
-            const file = try std.fs.cwd().openFile(mirrors_path, .{});
+            // load the mirrorlist we just downloaded, or is still around from a previous run
+            const file = try std.fs.cwd().openFile(mirrorlist_path, .{});
             defer file.close();
             break :blk try file.readToEndAlloc(gpa, std.math.maxInt(usize));
         };
