@@ -447,8 +447,10 @@ pub fn main() !void {
         var fetch_successful: bool = false;
         for (mirrors.list.items) |mirror_url| {
             fetchinfo = try FetchInfo.init(gpa, app_data_path, mirror_url, zig_archive_filename);
-            errdefer fetchinfo.deinit(gpa);
-            fetchinfo.fetchAndValidate(gpa) catch continue;
+            fetchinfo.fetchAndValidate(gpa) catch {
+                fetchinfo.deinit(gpa);
+                continue;
+            };
             fetch_successful = true;
             break;
         }
