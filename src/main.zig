@@ -436,13 +436,19 @@ pub fn main() !void {
 
         const url = try getVersionUrl(arena, app_data_path, semantic_version);
         defer url.deinit(arena);
+
+        const filename = url.fetch[std.mem.lastIndexOfScalar(u8, url.fetch, '/').? + 1 ..];
+        const mirror_url = try MirrorUrls.getUrl(arena, app_data_path, filename);
+        // log.info("{f}", .{std.json.fmt(mirror_urls.list.items, .{ .whitespace = .indent_4 })});
+
         const hash = hashAndPath(try cmdFetch(
             gpa,
             arena,
             global_cache_directory,
-            url.fetch,
+            mirror_url,
             .{ .debug_hash = false },
         ));
+
         log.info("downloaded {s} to '{}{s}'", .{ hashstore_name, global_cache_directory, hash.path() });
         if (maybe_hash) |*previous_hash| {
             if (previous_hash.val.eql(&hash.val)) {
@@ -872,6 +878,54 @@ fn makeOfficialUrl(arena: Allocator, semantic_version: SemanticVersion) Download
         ) catch |e| oom(e)),
     };
 }
+
+pub const MirrorUrls = struct {
+    list: std.ArrayListUnmanaged([]const u8) = .empty,
+    pub const mirrorlist = struct {
+        pub const url = "https://ziglang.org/download/community-mirrors.txt";
+        pub const uri = std.Uri.parse(url) catch unreachable;
+    };
+
+    fn getUrl(
+        arena: Allocator,
+        app_data_path: []const u8,
+        filename: []const u8,
+    ) ![]const u8 {
+        const self = try get(arena, app_data_path);
+        assert(self.list.items.len > 0);
+        return std.fmt.allocPrint(arena, "{s}{s}{s}?source=anyzig", .{
+            self.list.items[0],
+            if (std.mem.endsWith(u8, self.list.items[0], "/")) "" else "/",
+            filename,
+        });
+    }
+
+    fn get(
+        arena: Allocator,
+        app_data_path: []const u8,
+    ) !@This() {
+        const mirrors_path = try std.fs.path.join(arena, &.{ app_data_path, "community-mirrors.txt" });
+        var self: @This() = .{};
+
+        try fetchFile(arena, mirrorlist.url, mirrorlist.uri, mirrors_path);
+
+        const mirrors_content = blk: {
+            // since we just downloaded the file, this should always succeed now
+            const file = try std.fs.cwd().openFile(mirrors_path, .{});
+            defer file.close();
+            break :blk try file.readToEndAlloc(arena, std.math.maxInt(usize));
+        };
+        var iter = std.mem.splitScalar(u8, mirrors_content, '\n');
+        while (iter.next()) |mirror| {
+            if (std.mem.startsWith(u8, mirror, "http")) {
+                try self.list.append(arena, mirror);
+            }
+        }
+        var rand = std.Random.DefaultPrng.init(@bitCast(std.time.timestamp()));
+        rand.random().shuffle([]const u8, self.list.items);
+        return self;
+    }
+};
 
 fn getVersionUrl(
     arena: Allocator,
