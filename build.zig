@@ -655,6 +655,7 @@ fn ci(
                 .single_threaded = true,
                 .imports = &.{
                     .{ .name = "zig", .module = zig_mod },
+                    .{ .name = "minizign", .module = minizign_mod },
                     .{ .name = "version", .module = release_version_embed },
                 },
             }),
