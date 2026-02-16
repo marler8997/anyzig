@@ -443,7 +443,8 @@ pub fn main() !void {
 
         const zig_archive_filename = url.fetch[std.mem.lastIndexOfScalar(u8, url.fetch, '/').? + 1 ..];
 
-        const fetchinfo = try mirrors.fetchFromAny(gpa, app_data_path, zig_archive_filename);
+        const download_path = try std.fs.path.join(arena, &.{ app_data_path, "download" });
+        const fetchinfo = try mirrors.fetchFromAny(gpa, download_path, zig_archive_filename);
         defer fetchinfo.deinit(gpa);
 
         const hash = hashAndPath(try cmdFetch(
@@ -906,7 +907,7 @@ const FetchInfo = struct {
         });
         errdefer gpa.free(minisign_url);
 
-        const minisig_filename = try std.fmt.allocPrint(gpa, "tmp-{s}{s}", .{ filename, ".minisig" });
+        const minisig_filename = try std.fmt.allocPrint(gpa, "{s}{s}", .{ filename, ".minisig" });
         defer gpa.free(minisig_filename);
 
         const minisign_path = try std.fs.path.join(gpa, &.{
@@ -928,7 +929,7 @@ const FetchInfo = struct {
         };
         std.fs.cwd().deleteFile(self.minisign_path) catch |err| switch (err) {
             error.FileNotFound => {},
-            else => std.log.err("remove '{s}' failed with {s}", .{ self.archive_path, @errorName(err) }),
+            else => std.log.err("remove '{s}' failed with {s}", .{ self.minisign_path, @errorName(err) }),
         };
         gpa.free(self.archive_url);
         gpa.free(self.minisign_url);
