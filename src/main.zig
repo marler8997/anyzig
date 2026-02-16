@@ -434,24 +434,31 @@ pub fn main() !void {
                 else => |e| return e,
             }
         }
-        var mirrors = try MirrorUrls.get(gpa, app_data_path);
-        defer mirrors.deinit(gpa);
-        assert(mirrors.list.items.len > 0);
 
-        const url = try getVersionUrl(arena, app_data_path, semantic_version);
+        var url = try getVersionUrl(arena, app_data_path, semantic_version);
         defer url.deinit(arena);
 
-        const zig_archive_filename = url.fetch[std.mem.lastIndexOfScalar(u8, url.fetch, '/').? + 1 ..];
+        const fetchinfo: ?FetchInfo = if (std.mem.startsWith(u8, url.fetch, "https://ziglang.org")) fetchinfo: {
+            var mirrors = try MirrorUrls.get(gpa, app_data_path);
+            defer mirrors.deinit(gpa);
+            assert(mirrors.list.items.len > 0);
 
-        const download_path = try std.fs.path.join(arena, &.{ app_data_path, "download" });
-        const fetchinfo = try mirrors.fetchFromAny(gpa, download_path, zig_archive_filename);
-        defer fetchinfo.deinit(gpa);
+            const zig_archive_filename = url.fetch[std.mem.lastIndexOfScalar(u8, url.fetch, '/').? + 1 ..];
+
+            const download_path = try std.fs.path.join(arena, &.{ app_data_path, "download" });
+            const fi = try mirrors.fetchFromAny(gpa, download_path, zig_archive_filename);
+            url.fetch = fi.archive_path;
+            break :fetchinfo fi;
+        } else null;
+        defer {
+            if (fetchinfo) |fi| fi.deinit(gpa);
+        }
 
         const hash = hashAndPath(try cmdFetch(
             gpa,
             arena,
             global_cache_directory,
-            fetchinfo.archive_path,
+            url.fetch,
             .{ .debug_hash = false },
         ));
 
