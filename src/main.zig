@@ -1190,39 +1190,53 @@ fn fetchFile(
 
     var client = std.http.Client{ .allocator = scratch };
     defer client.deinit();
-    client.initDefaultProxies(scratch) catch |err| std.debug.panic(
-        "fetch '{}': init proxy failed with {s}",
-        .{ uri, @errorName(err) },
-    );
+    client.initDefaultProxies(scratch) catch |err| {
+        log.err(
+            "fetch '{}': init proxy failed with {s}",
+            .{ uri, @errorName(err) },
+        );
+        return err;
+    };
+
     var header_buffer: [4096]u8 = undefined;
-    var request = client.open(.GET, uri, .{
+    var request = try client.open(.GET, uri, .{
         .server_header_buffer = &header_buffer,
         .keep_alive = false,
-    }) catch |e| std.debug.panic(
-        "fetch '{}': connect failed with {s}",
-        .{ uri, @errorName(e) },
-    );
+    });
     defer request.deinit();
-    request.send() catch |e| std.debug.panic(
-        "fetch '{}': send failed with {s}",
-        .{ uri, @errorName(e) },
-    );
-    request.wait() catch |e| std.debug.panic(
-        "fetch '{}': wait failed with {s}",
-        .{ uri, @errorName(e) },
-    );
-    if (request.response.status != .ok) return errExit(
-        "fetch '{}': HTTP response {} \"{?s}\"",
-        .{ uri, @intFromEnum(request.response.status), request.response.status.phrase() },
-    );
+    request.send() catch |e| {
+        log.err(
+            "fetch '{}': send failed with {s}",
+            .{ uri, @errorName(e) },
+        );
+        return e;
+    };
+    request.wait() catch |e| {
+        std.debug.panic(
+            "fetch '{}': wait failed with {s}",
+            .{ uri, @errorName(e) },
+        );
+        return e;
+    };
+
+    if (request.response.status != .ok) {
+        log.err(
+            "fetch '{}': HTTP response {} \"{?s}\"",
+            .{ uri, @intFromEnum(request.response.status), request.response.status.phrase() },
+        );
+        return error.BadHttpStatus;
+    }
 
     const out_filepath_tmp = std.mem.concat(scratch, u8, &.{ out_filepath, ".fetching" }) catch |e| oom(e);
     defer scratch.free(out_filepath_tmp);
 
-    const file = std.fs.cwd().createFile(out_filepath_tmp, .{}) catch |e| std.debug.panic(
-        "create '{s}' failed with {s}",
-        .{ out_filepath_tmp, @errorName(e) },
-    );
+    const file = std.fs.cwd().createFile(out_filepath_tmp, .{}) catch |e| {
+        std.log.err(
+            "create '{s}' failed with {s}",
+            .{ out_filepath_tmp, @errorName(e) },
+        );
+        return error.CouldNotCreateFile;
+    };
     defer {
         if (std.fs.cwd().deleteFile(out_filepath_tmp)) {
             std.log.info("removed '{s}'", .{out_filepath_tmp});
