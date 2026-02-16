@@ -444,19 +444,21 @@ pub fn main() !void {
 
         // TODO: retries
         const zig_archive_filename = url.fetch[std.mem.lastIndexOfScalar(u8, url.fetch, '/').? + 1 ..];
-        const mirror = try FetchInfo.init(gpa, app_data_path, mirrors.list.items[0], zig_archive_filename);
-        defer mirror.deinit(gpa);
+        const fetchinfo = try FetchInfo.init(gpa, app_data_path, mirrors.list.items[0], zig_archive_filename);
+        defer fetchinfo.deinit(gpa);
 
-        defer std.fs.cwd().deleteFile(mirror.archive_path) catch {};
-        try fetchFile(arena, mirror.archive_url, try std.Uri.parse(mirror.archive_url), mirror.archive_path);
+        defer std.fs.cwd().deleteFile(fetchinfo.archive_path) catch {};
+        try fetchFile(arena, fetchinfo.archive_url, try std.Uri.parse(fetchinfo.archive_url), fetchinfo.archive_path);
+        defer std.fs.cwd().deleteFile(fetchinfo.minisign_path) catch {};
+        try fetchFile(arena, fetchinfo.minisign_url, try std.Uri.parse(fetchinfo.minisign_url), fetchinfo.minisign_path);
 
-        // TODO: download and verify minizign signature
+        try fetchinfo.validateMinisign(gpa);
 
         const hash = hashAndPath(try cmdFetch(
             gpa,
             arena,
             global_cache_directory,
-            mirror.archive_path,
+            fetchinfo.archive_path,
             .{ .debug_hash = false },
         ));
 
@@ -921,6 +923,25 @@ const FetchInfo = struct {
             .minisign_path = minisign_path,
             .archive_path = minisign_path[0 .. minisign_path.len - ".minisig".len],
         };
+    }
+
+    const zig_org_minisign_pubkey = minizign.PublicKey.decodeFromBase64("RWSGOq2NVecA2UPNdBUZykf1CCb147pkmdtYxgb3Ti+JO/wCYvhbAb/U") catch unreachable;
+    fn validateMinisign(self: @This(), gpa: Allocator) !void {
+        const sig_bytes = try std.fs.cwd().readFileAlloc(gpa, self.minisign_path, std.math.maxInt(u32));
+        defer gpa.free(sig_bytes);
+
+        const archive_file = try std.fs.cwd().openFile(self.archive_path, .{});
+        defer archive_file.close();
+
+        var sig = try minizign.Signature.decode(gpa, sig_bytes);
+        defer sig.deinit();
+
+        try zig_org_minisign_pubkey.verifyFile(
+            gpa,
+            archive_file,
+            sig,
+            null,
+        );
     }
 
     fn deinit(self: @This(), gpa: Allocator) void {
