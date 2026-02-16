@@ -1277,10 +1277,13 @@ fn fetchFile(
     var total_received: u64 = 0;
     while (true) {
         var buf: [@max(std.heap.page_size_min, 4096)]u8 = undefined;
-        const len = request.reader().read(&buf) catch |e| std.debug.panic(
-            "fetch '{}': read failed with {s}",
-            .{ uri, @errorName(e) },
-        );
+        const len = request.reader().read(&buf) catch |e| {
+            log.err(
+                "fetch '{}': read failed with {s}",
+                .{ uri, @errorName(e) },
+            );
+            return e;
+        };
         if (len == 0) break;
         total_received += len;
 
@@ -1295,17 +1298,23 @@ fn fetchFile(
         }
         // NOTE: not going through a buffered writer since we're writing
         //       large chunks
-        file.writer().writeAll(buf[0..len]) catch |err| std.debug.panic(
-            "fetch '{}': write {} bytes of HTTP response failed with {s}",
-            .{ uri, len, @errorName(err) },
-        );
+        file.writer().writeAll(buf[0..len]) catch |err| {
+            log.err(
+                "fetch '{}': write {} bytes of HTTP response failed with {s}",
+                .{ uri, len, @errorName(err) },
+            );
+            return err;
+        };
     }
 
     if (maybe_content_length) |content_length| {
-        if (total_received != content_length) errExit(
-            "fetch '{}': Content-Length is {} but only read {}",
-            .{ uri, content_length, total_received },
-        );
+        if (total_received != content_length) {
+            log.err(
+                "fetch '{}': Content-Length is {} but only read {}",
+                .{ uri, content_length, total_received },
+            );
+            return error.ContentLengthMismatch;
+        }
     }
 
     try std.fs.cwd().rename(out_filepath_tmp, out_filepath);
