@@ -808,7 +808,7 @@ const DownloadIndexKind = enum {
     pub fn url(self: DownloadIndexKind) []const u8 {
         return switch (self) {
             .official => "https://ziglang.org/download/index.json",
-            .mach => "https://machengine.org/zig/index.json",
+            .mach => "https://pkg.hexops.org/zig/index.json",
         };
     }
     pub fn uri(self: DownloadIndexKind) std.Uri {
