@@ -32,6 +32,7 @@ pub fn build(b: *std.Build) !void {
     });
 
     const options = b.addOptions();
+    options.addOption(bool, "enable_debug_extensions", false);
     zig_mod.addOptions("build_options", options);
 
     const target = b.standardTargetOptions(.{});
@@ -96,9 +97,11 @@ pub fn build(b: *std.Build) !void {
 
     const host_zip_exe = b.addExecutable(.{
         .name = "zip",
-        .root_source_file = zip_dep.path("src/zip.zig"),
-        .target = b.graph.host,
-        .optimize = .Debug,
+        .root_module = b.createModule(.{
+            .root_source_file = zip_dep.path("src/zip.zig"),
+            .target = b.graph.host,
+            .optimize = .Debug,
+        }),
     });
 
     const ci_step = b.step("ci", "The build/test step to run on the CI");
@@ -157,6 +160,7 @@ fn makeCalVersion() ![11]u8 {
 fn setBuildOptions(b: *std.Build, exe: *std.Build.Step.Compile, exe_kind: Exe) void {
     const o = b.addOptions();
     o.addOption(Exe, "exe", exe_kind);
+    o.addOption(bool, "enable_debug_extensions", false);
     exe.root_module.addOptions("build_options", o);
 }
 
@@ -220,8 +224,10 @@ fn addTests(
         .anyzig = anyzig,
         .wrap_exe = b.addExecutable(.{
             .name = "wrap",
-            .root_source_file = b.path("test/wrap.zig"),
-            .target = b.graph.host,
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("test/wrap.zig"),
+                .target = b.graph.host,
+            }),
         }),
         .make_build_steps = opt.make_build_steps,
     };
