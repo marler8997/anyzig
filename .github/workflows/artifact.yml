@@ -5,33 +5,9 @@ jobs:
     strategy:
       matrix:
         include:
-          # Windows builds
           - os: windows-latest
-            arch: aarch64
-          - os: windows-latest
-            arch: x86
-          - os: windows-latest
-            arch: x86_64
-          # macOS builds
           - os: macos-latest
-            arch: aarch64
-          - os: macos-latest
-            arch: x86_64
-          # Linux builds
           - os: ubuntu-latest
-            arch: aarch64
-          - os: ubuntu-latest
-            arch: armv7a
-          - os: ubuntu-latest
-            arch: powerpc64le
-          - os: ubuntu-latest
-            arch: riscv64
-          - os: ubuntu-latest
-            arch: s390x
-          - os: ubuntu-latest
-            arch: x86
-          - os: ubuntu-latest
-            arch: x86_64
       fail-fast: false
     runs-on: ${{matrix.os}}
     steps:
@@ -39,11 +15,11 @@ jobs:
       - uses: mlugg/setup-zig@v2
       - run: |
           zig build ci --summary all
-      - if: ${{ matrix.os == 'ubuntu-latest' && matrix.arch == 'x86_64' }}
+      - if: ${{ matrix.os == 'ubuntu-latest' }}
         name: getversion
         id: version
         run: echo "version=$(cat zig-out/version-release)" >> $GITHUB_OUTPUT
-      - if: ${{ matrix.os == 'ubuntu-latest' && matrix.arch == 'x86_64' }}
+      - if: ${{ matrix.os == 'ubuntu-latest' }}
         uses: actions/upload-artifact@v4
         with:
           name: anyzig-${{ steps.version.outputs.version }}-archives
