@@ -334,6 +334,18 @@ fn addTests(
                 },
                 else => {},
             },
+            .windows => switch (builtin.cpu.arch) {
+                .aarch64 => switch (comptime zig_release) {
+                    // no windows-aarch64 downloads before 0.9.0
+                    .@"0.7.0",
+                    .@"0.7.1",
+                    .@"0.8.0",
+                    .@"0.8.1",
+                    => continue,
+                    else => {},
+                },
+                else => {},
+            },
             else => {},
         }
 
@@ -381,6 +393,13 @@ fn addTests(
                     .@"0.7.0" => false, // crashes for some reason?
                     .@"0.9.0", .@"0.9.1" => false, // panics
                     .@"0.10.0", .@"0.10.1" => false, // error(link): undefined reference to symbol 'dyld_stub_binder'
+                    else => true,
+                },
+                else => true,
+            },
+            .windows => switch (b.graph.host.result.cpu.arch) {
+                .aarch64 => switch (zig_release) {
+                    .@"0.9.0", .@"0.9.1" => false, // zig build crashes with exit code 255
                     else => true,
                 },
                 else => true,

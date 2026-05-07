@@ -6,6 +6,7 @@ jobs:
       matrix:
         include:
           - os: windows-latest
+          - os: windows-11-arm
           - os: macos-latest
           - os: ubuntu-latest
       fail-fast: false
