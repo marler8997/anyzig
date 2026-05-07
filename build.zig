@@ -310,6 +310,8 @@ fn addTests(
         const zig_version = field.name;
         const zig_release: ZigRelease = @enumFromInt(field.value);
 
+        if (zig_release == .@"2024.11.0-mach") continue; // TODO: re-enable when pkg.hexops.org is back online
+
         switch (builtin.os.tag) {
             .linux => switch (builtin.cpu.arch) {
                 .x86_64 => switch (comptime zig_release) {
