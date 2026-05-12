@@ -240,10 +240,68 @@ fn isMachVersion(v: SemanticVersion) bool {
     return false;
 }
 
-fn stripMachVersion(v: SemanticVersion) SemanticVersion {
-    var result = v;
-    result.pre = null;
-    return result;
+fn extractZigVersionFromMachIndex(
+    arena: Allocator,
+    app_data_path: []const u8,
+    semantic_version: SemanticVersion,
+) !SemanticVersion {
+    const download_index_kind: DownloadIndexKind = .mach;
+    const index_path = try std.fs.path.join(arena, &.{ app_data_path, download_index_kind.basename() });
+    defer arena.free(index_path);
+
+    // Try existing cached index first.
+    try_existing_index: {
+        const index_content = blk: {
+            const file = std.fs.cwd().openFile(index_path, .{}) catch |err| switch (err) {
+                error.FileNotFound => break :try_existing_index,
+                else => |e| return e,
+            };
+            defer file.close();
+            break :blk try file.readToEndAlloc(arena, std.math.maxInt(usize));
+        };
+        defer arena.free(index_content);
+        if (extractVersionFromMachIndex(arena, semantic_version, index_path, index_content)) |v|
+            return v;
+    }
+
+    // Cache miss or version not found -- fetch fresh index.
+    try fetchFile(arena, download_index_kind.url(), download_index_kind.uri(), index_path);
+    const index_content = blk: {
+        const file = try std.fs.cwd().openFile(index_path, .{});
+        defer file.close();
+        break :blk try file.readToEndAlloc(arena, std.math.maxInt(usize));
+    };
+    defer arena.free(index_content);
+    return extractVersionFromMachIndex(arena, semantic_version, index_path, index_content) orelse {
+        errExit("compiler version '{}' is missing from mach download index {s}", .{ semantic_version, index_path });
+    };
+}
+
+fn extractVersionFromMachIndex(
+    scratch: Allocator,
+    semantic_version: SemanticVersion,
+    index_filepath: []const u8,
+    download_index: []const u8,
+) ?SemanticVersion {
+    const root = std.json.parseFromSlice(std.json.Value, scratch, download_index, .{
+        .allocate = .alloc_if_needed,
+    }) catch |e| std.debug.panic(
+        "failed to parse download index '{s}' as JSON with {s}",
+        .{ index_filepath, @errorName(e) },
+    );
+    defer root.deinit();
+
+    const version_array = semantic_version.array();
+    const version_str = version_array.slice();
+    const version_obj = root.value.object.get(version_str) orelse return null;
+    const zig_version_val = version_obj.object.get("version") orelse std.debug.panic(
+        "mach download index '{s}' version '{s}' is missing the 'version' property",
+        .{ index_filepath, version_str },
+    );
+    return SemanticVersion.parse(zig_version_val.string) orelse errExit(
+        "unable to parse zig version '{s}' from mach download index",
+        .{zig_version_val.string},
+    );
 }
 
 fn determineSemanticVersion(scratch: Allocator, build_root: BuildRoot) !SemanticVersion {
@@ -885,9 +943,10 @@ fn getVersionUrl(
     semantic_version: SemanticVersion,
 ) !DownloadUrl {
     if (build_options.exe == .zls) {
-        // ZLS doesn't have Mach versions, so strip the -mach suffix
+        // ZLS doesn't have Mach versions. Look up the underlying Zig version
+        // from the Mach download index and use that for the ZLS URL.
         const zls_version = if (isMachVersion(semantic_version))
-            stripMachVersion(semantic_version)
+            try extractZigVersionFromMachIndex(arena, app_data_path, semantic_version)
         else
             semantic_version;
 
