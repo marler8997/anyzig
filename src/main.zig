@@ -240,6 +240,12 @@ fn isMachVersion(v: SemanticVersion) bool {
     return false;
 }
 
+fn stripMachVersion(v: SemanticVersion) SemanticVersion {
+    var result = v;
+    result.pre = null;
+    return result;
+}
+
 fn determineSemanticVersion(scratch: Allocator, build_root: BuildRoot) !SemanticVersion {
     const zon = try loadBuildZigZon(scratch, build_root) orelse {
         log.err("TODO: no build.zig.zon file, maybe try determining zig version from build.zig?", .{});
@@ -878,17 +884,25 @@ fn getVersionUrl(
     app_data_path: []const u8,
     semantic_version: SemanticVersion,
 ) !DownloadUrl {
-    if (build_options.exe == .zls) return DownloadUrl.initOfficial(std.fmt.allocPrint(
-        arena,
-        "https://builds.zigtools.org/zls-{s}-{}.{s}",
-        .{ switch (determineVersionKind(semantic_version)) {
-            .dev => arch_os,
-            .release => |release| switch (release.order(arch_os_swap_release)) {
-                .lt => os_arch,
-                .gt, .eq => arch_os,
-            },
-        }, semantic_version, archive_ext },
-    ) catch |e| oom(e));
+    if (build_options.exe == .zls) {
+        // ZLS doesn't have Mach versions, so strip the -mach suffix
+        const zls_version = if (isMachVersion(semantic_version))
+            stripMachVersion(semantic_version)
+        else
+            semantic_version;
+
+        return DownloadUrl.initOfficial(std.fmt.allocPrint(
+            arena,
+            "https://builds.zigtools.org/zls-{s}-{}.{s}",
+            .{ switch (determineVersionKind(zls_version)) {
+                .dev => arch_os,
+                .release => |release| switch (release.order(arch_os_swap_release)) {
+                    .lt => os_arch,
+                    .gt, .eq => arch_os,
+                },
+            }, zls_version, archive_ext },
+        ) catch |e| oom(e));
+    }
 
     if (!isMachVersion(semantic_version)) return makeOfficialUrl(arena, semantic_version);
 
