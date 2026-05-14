@@ -546,7 +546,7 @@ fn anyCommandUsage() !u8 {
         "any" ++ @tagName(build_options.exe) ++ " {s} from https://github.com/marler8997/anyzig\n" ++
             "Here are the anyzig-specific subcommands:\n" ++
             "  zig any set-verbosity LEVEL    | sets the default system-wide verbosity\n" ++
-            "                                 | accepts 'warn' or 'debug\n" ++
+            "                                 | accepts 'warn' or 'debug'\n" ++
             "  zig any version                | print the version of anyzig to stdout\n" ++
             "  zig any list-installed         | list all versions of zig installed in the global cache\n",
         .{@embedFile("version")},
