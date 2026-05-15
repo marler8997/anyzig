@@ -1,16 +1,16 @@
 .{
     .name = .anyzig,
-    .version = "0.0.0",
+    .version = "0.0.1",
     .fingerprint = 0x7cd092f5bd0fed33, // Changing this has security and trust implications.
-    .minimum_zig_version = "0.14.0",
+    .minimum_zig_version = "0.15.2",
     .dependencies = .{
         .zig = .{
-            .url = "git+https://github.com/ziglang/zig#5ad91a646a753cc3eecd8751e61cf458dadd9ac4",
-            .hash = "zig-0.0.0-Fp4XJDTgLgvQHn6QVvTe6INRdgdAzu43qE4JBXxhn9Ln",
+            .url = "git+https://github.com/ziglang/zig#e4cbd752c8c05f131051f8c873cff7823177d7d3",
+            .hash = "zig-0.0.0-Fp4XJKXnIg1JKwvJXEknkiiVAIj_oVQtP-3VY8zsACRF",
         },
         .zip = .{
-            .url = "git+https://github.com/marler8997/zipcmdline#3dfca786a489d117e4b72ea10ffb4bbd9fc2dd72",
-            .hash = "12201a08d7eff7619c8eb8284691a3ff959861b4bdd87216f180ed136672fb4ea26f",
+            .url = "git+https://github.com/marler8997/zipcmdline#a8807944231b46565450504cb7f3146e29e51335",
+            .hash = "zipcmdline-0.0.0-DFii09hmAwAK1TuCE9eIMZANDZRJnodAHOUOCM8pAPO3",
         },
     },
     .paths = .{

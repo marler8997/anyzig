@@ -16,7 +16,7 @@ pub fn build(b: *std.Build) void {
         .makeFn = struct {
             fn make(step: *std.Build.Step, _: MakeOptions) anyerror!void {
                 _ = step;
-                try std.io.getStdOut().writer().print("{}\n", .{builtin.zig_version});
+                try std.debug.print("{f}\n", .{builtin.zig_version});
             }
         }.make,
     });
