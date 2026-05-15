@@ -17,6 +17,7 @@ const Directory = std.Build.Cache.Directory;
 const EnvVar = std.zig.EnvVar;
 
 const zig = @import("zig");
+const minizign = @import("minizign");
 
 const Package = zig.Package;
 const introspect = zig.introspect;
@@ -434,8 +435,30 @@ pub fn main() !void {
             }
         }
 
-        const url = try getVersionUrl(arena, app_data_path, semantic_version);
-        defer url.deinit(arena);
+        var url = try getVersionUrl(arena, app_data_path, semantic_version);
+
+        const fetchinfo: ?FetchInfo = if (!std.mem.startsWith(u8, url.fetch, "https://ziglang.org"))
+            null
+        else fetchinfo: {
+            var mirrors = try MirrorUrls.get(gpa, app_data_path);
+            defer mirrors.deinit(gpa);
+            if (mirrors.list.items.len == 0) {
+                log.err("no zig mirrors found.", .{});
+                break :fetchinfo null;
+            }
+
+            const zig_archive_filename = url.fetch[std.mem.lastIndexOfScalar(u8, url.fetch, '/').? + 1 ..];
+
+            const download_path = try std.fs.path.join(arena, &.{ app_data_path, "download" });
+            const fi = try mirrors.fetchFromAny(gpa, download_path, zig_archive_filename);
+            url.fetch = fi.archive_path;
+            break :fetchinfo fi;
+        };
+
+        defer {
+            if (fetchinfo) |fi| fi.deinit(gpa);
+        }
+
         const hash = hashAndPath(try cmdFetch(
             gpa,
             arena,
@@ -443,6 +466,7 @@ pub fn main() !void {
             url.fetch,
             .{ .debug_hash = false },
         ));
+
         log.info("downloaded {s} to '{}{s}'", .{ hashstore_name, global_cache_directory, hash.path() });
         if (maybe_hash) |*previous_hash| {
             if (previous_hash.val.eql(&hash.val)) {
@@ -873,6 +897,169 @@ fn makeOfficialUrl(arena: Allocator, semantic_version: SemanticVersion) Download
     };
 }
 
+const FetchInfo = struct {
+    archive_url: []const u8,
+    archive_path: []const u8,
+    minisign_url: []const u8,
+    minisign_path: []const u8,
+    const anyzig_mirror_url_query = "source=anyzig/" ++ @embedFile("version");
+    fn init(gpa: Allocator, tmpdir: []const u8, mirror_url: []const u8, filename: []const u8) !@This() {
+        const archive_url = try std.fmt.allocPrint(gpa, "{s}{s}{s}?{s}", .{
+            mirror_url,
+            if (std.mem.endsWith(u8, mirror_url, "/")) "" else "/",
+            filename,
+            anyzig_mirror_url_query,
+        });
+        errdefer gpa.free(archive_url);
+        const minisign_url = try std.fmt.allocPrint(gpa, "{s}{s}{s}.minisig?{s}", .{
+            mirror_url,
+            if (std.mem.endsWith(u8, mirror_url, "/")) "" else "/",
+            filename,
+            anyzig_mirror_url_query,
+        });
+        errdefer gpa.free(minisign_url);
+
+        const minisig_filename = try std.fmt.allocPrint(gpa, "{s}{s}", .{ filename, ".minisig" });
+        defer gpa.free(minisig_filename);
+
+        const minisign_path = try std.fs.path.join(gpa, &.{
+            tmpdir,
+            minisig_filename,
+        });
+        return .{
+            .archive_url = archive_url,
+            .minisign_url = minisign_url,
+            .minisign_path = minisign_path,
+            .archive_path = minisign_path[0 .. minisign_path.len - ".minisig".len],
+        };
+    }
+
+    fn deinit(self: @This(), gpa: Allocator) void {
+        std.fs.cwd().deleteFile(self.archive_path) catch |err| switch (err) {
+            error.FileNotFound => {},
+            else => std.log.err("remove '{s}' failed with {s}", .{ self.archive_path, @errorName(err) }),
+        };
+        std.fs.cwd().deleteFile(self.minisign_path) catch |err| switch (err) {
+            error.FileNotFound => {},
+            else => std.log.err("remove '{s}' failed with {s}", .{ self.minisign_path, @errorName(err) }),
+        };
+        gpa.free(self.archive_url);
+        gpa.free(self.minisign_url);
+        gpa.free(self.minisign_path);
+        // do not free archive_path here, since its a slice of minisign_path
+    }
+
+    fn fetchAndValidate(self: @This(), gpa: Allocator) !void {
+        var arena = std.heap.ArenaAllocator.init(gpa);
+        defer arena.deinit();
+
+        fetchFile(
+            arena.allocator(),
+            self.archive_url,
+            try std.Uri.parse(self.archive_url),
+            self.archive_path,
+        ) catch |err| {
+            std.log.err("failed to download archive: {} {s}", .{ err, self.archive_url });
+            return err;
+        };
+        fetchFile(
+            arena.allocator(),
+            self.minisign_url,
+            try std.Uri.parse(self.minisign_url),
+            self.minisign_path,
+        ) catch |err| {
+            std.log.err("failed to download signature: {} {s}", .{ err, self.minisign_url });
+            return err;
+        };
+
+        self.validateMinisign(gpa) catch |err| {
+            std.log.err("failed to validate: {} {s}", .{ err, self.archive_url });
+            return err;
+        };
+    }
+
+    const zig_org_minisign_pubkey = minizign.PublicKey.decodeFromBase64("RWSGOq2NVecA2UPNdBUZykf1CCb147pkmdtYxgb3Ti+JO/wCYvhbAb/U") catch unreachable;
+    fn validateMinisign(self: @This(), gpa: Allocator) !void {
+        const sig_bytes = try std.fs.cwd().readFileAlloc(gpa, self.minisign_path, std.math.maxInt(u32));
+        defer gpa.free(sig_bytes);
+
+        const archive_file = try std.fs.cwd().openFile(self.archive_path, .{});
+        defer archive_file.close();
+
+        var sig = try minizign.Signature.decode(gpa, sig_bytes);
+        defer sig.deinit();
+
+        try zig_org_minisign_pubkey.verifyFile(
+            gpa,
+            archive_file,
+            sig,
+            null,
+        );
+    }
+};
+
+pub const MirrorUrls = struct {
+    list: std.ArrayListUnmanaged([]const u8) = .empty,
+    const mirrorlist = struct {
+        const url = "https://ziglang.org/download/community-mirrors.txt";
+        const uri = std.Uri.parse(url) catch unreachable;
+    };
+
+    fn get(
+        gpa: Allocator,
+        tmpdir: []const u8,
+    ) !@This() {
+        const mirrorlist_path = try std.fs.path.join(gpa, &.{ tmpdir, "community-mirrors.txt" });
+        defer gpa.free(mirrorlist_path);
+        var self: @This() = .{};
+
+        var arena = std.heap.ArenaAllocator.init(gpa);
+        defer arena.deinit();
+        fetchFile(arena.allocator(), mirrorlist.url, mirrorlist.uri, mirrorlist_path) catch {
+            log.err("failed to fetch mirrorlist to: {s}", .{mirrorlist_path});
+        };
+
+        const mirrors_content = blk: {
+            // load the mirrorlist we just downloaded, or is still around from a previous run
+            const file = try std.fs.cwd().openFile(mirrorlist_path, .{});
+            defer file.close();
+            break :blk try file.readToEndAlloc(gpa, std.math.maxInt(usize));
+        };
+        defer gpa.free(mirrors_content);
+
+        var iter = std.mem.splitScalar(u8, mirrors_content, '\n');
+        while (iter.next()) |mirror| {
+            const mirror_without_whitespace = std.mem.trim(u8, mirror, &std.ascii.whitespace);
+            if (mirror_without_whitespace.len > 0) {
+                try self.list.append(gpa, try gpa.dupe(u8, mirror));
+            }
+        }
+        var rand = std.Random.DefaultPrng.init(@bitCast(std.time.timestamp()));
+        rand.random().shuffle([]const u8, self.list.items);
+        return self;
+    }
+
+    fn fetchFromAny(self: @This(), gpa: Allocator, tmpdir: []const u8, filename: []const u8) !FetchInfo {
+        for (self.list.items) |mirror_url| {
+            const fetchinfo = try FetchInfo.init(gpa, tmpdir, mirror_url, filename);
+            fetchinfo.fetchAndValidate(gpa) catch {
+                fetchinfo.deinit(gpa);
+                continue;
+            };
+            return fetchinfo;
+        }
+        log.err("ran out of mirrors for: {s}", .{filename});
+        return error.NoMoreMirrors;
+    }
+
+    fn deinit(self: *@This(), gpa: Allocator) void {
+        for (self.list.items) |mirror| {
+            gpa.free(mirror);
+        }
+        self.list.deinit(gpa);
+    }
+};
+
 fn getVersionUrl(
     arena: Allocator,
     app_data_path: []const u8,
@@ -1016,7 +1203,7 @@ fn fetchFile(
 
     const progress_node_name = std.fmt.allocPrint(scratch, "fetch {s}", .{uri}) catch |e| oom(e);
     defer scratch.free(progress_node_name);
-    const node = root.start(progress_node_name, 1);
+    const node = root.start(progress_node_name, 0);
     defer node.end();
 
     const lock_filepath = try std.mem.concat(scratch, u8, &.{ out_filepath, ".lock" });
@@ -1028,45 +1215,59 @@ fn fetchFile(
 
     var client = std.http.Client{ .allocator = scratch };
     defer client.deinit();
-    client.initDefaultProxies(scratch) catch |err| std.debug.panic(
-        "fetch '{}': init proxy failed with {s}",
-        .{ uri, @errorName(err) },
-    );
+    client.initDefaultProxies(scratch) catch |err| {
+        log.err(
+            "fetch '{}': init proxy failed with {s}",
+            .{ uri, @errorName(err) },
+        );
+        return err;
+    };
+
     var header_buffer: [4096]u8 = undefined;
-    var request = client.open(.GET, uri, .{
+    var request = try client.open(.GET, uri, .{
         .server_header_buffer = &header_buffer,
         .keep_alive = false,
-    }) catch |e| std.debug.panic(
-        "fetch '{}': connect failed with {s}",
-        .{ uri, @errorName(e) },
-    );
+    });
     defer request.deinit();
-    request.send() catch |e| std.debug.panic(
-        "fetch '{}': send failed with {s}",
-        .{ uri, @errorName(e) },
-    );
-    request.wait() catch |e| std.debug.panic(
-        "fetch '{}': wait failed with {s}",
-        .{ uri, @errorName(e) },
-    );
-    if (request.response.status != .ok) return errExit(
-        "fetch '{}': HTTP response {} \"{?s}\"",
-        .{ uri, @intFromEnum(request.response.status), request.response.status.phrase() },
-    );
+    request.send() catch |e| {
+        log.err(
+            "fetch '{}': send failed with {s}",
+            .{ uri, @errorName(e) },
+        );
+        return e;
+    };
+    request.wait() catch |e| {
+        log.err(
+            "fetch '{}': wait failed with {s}",
+            .{ uri, @errorName(e) },
+        );
+        return e;
+    };
+
+    if (request.response.status != .ok) {
+        log.err(
+            "fetch '{}': HTTP response {} \"{?s}\"",
+            .{ uri, @intFromEnum(request.response.status), request.response.status.phrase() },
+        );
+        return error.BadHttpStatus;
+    }
 
     const out_filepath_tmp = std.mem.concat(scratch, u8, &.{ out_filepath, ".fetching" }) catch |e| oom(e);
     defer scratch.free(out_filepath_tmp);
 
-    const file = std.fs.cwd().createFile(out_filepath_tmp, .{}) catch |e| std.debug.panic(
-        "create '{s}' failed with {s}",
-        .{ out_filepath_tmp, @errorName(e) },
-    );
+    const file = std.fs.cwd().createFile(out_filepath_tmp, .{}) catch |e| {
+        log.err(
+            "create '{s}' failed with {s}",
+            .{ out_filepath_tmp, @errorName(e) },
+        );
+        return error.CouldNotCreateFile;
+    };
     defer {
         if (std.fs.cwd().deleteFile(out_filepath_tmp)) {
-            std.log.info("removed '{s}'", .{out_filepath_tmp});
+            log.info("removed '{s}'", .{out_filepath_tmp});
         } else |err| switch (err) {
             error.FileNotFound => {},
-            else => |e| std.log.err("remove '{s}' failed with {s}", .{ out_filepath_tmp, @errorName(e) }),
+            else => |e| log.err("remove '{s}' failed with {s}", .{ out_filepath_tmp, @errorName(e) }),
         }
         file.close();
     }
@@ -1076,7 +1277,7 @@ fn fetchFile(
         // not sure if it's a problem with the mach server or Zig's HTTP client
         if (request.response.content_length) |content_length| {
             if (std.mem.eql(u8, url_string, DownloadIndexKind.mach.url())) {
-                std.log.warn("ignoring content length {} for mach index", .{content_length});
+                log.warn("ignoring content length {} for mach index", .{content_length});
                 break :blk null;
             }
         }
@@ -1090,32 +1291,44 @@ fn fetchFile(
     var total_received: u64 = 0;
     while (true) {
         var buf: [@max(std.heap.page_size_min, 4096)]u8 = undefined;
-        const len = request.reader().read(&buf) catch |e| std.debug.panic(
-            "fetch '{}': read failed with {s}",
-            .{ uri, @errorName(e) },
-        );
+        const len = request.reader().read(&buf) catch |e| {
+            log.err(
+                "fetch '{}': read failed with {s}",
+                .{ uri, @errorName(e) },
+            );
+            return e;
+        };
         if (len == 0) break;
         total_received += len;
 
         if (maybe_content_length) |content_length| {
-            if (total_received > content_length) errExit(
-                "fetch '{}': read more than Content-Length ({})",
-                .{ uri, content_length },
-            );
+            if (total_received > content_length) {
+                log.err(
+                    "fetch '{}': read more than Content-Length ({})",
+                    .{ uri, content_length },
+                );
+                return error.ContentLengthMismatch;
+            }
         }
         // NOTE: not going through a buffered writer since we're writing
         //       large chunks
-        file.writer().writeAll(buf[0..len]) catch |err| std.debug.panic(
-            "fetch '{}': write {} bytes of HTTP response failed with {s}",
-            .{ uri, len, @errorName(err) },
-        );
+        file.writer().writeAll(buf[0..len]) catch |err| {
+            log.err(
+                "fetch '{}': write {} bytes of HTTP response failed with {s}",
+                .{ uri, len, @errorName(err) },
+            );
+            return err;
+        };
     }
 
     if (maybe_content_length) |content_length| {
-        if (total_received != content_length) errExit(
-            "fetch '{}': Content-Length is {} but only read {}",
-            .{ uri, content_length, total_received },
-        );
+        if (total_received != content_length) {
+            log.err(
+                "fetch '{}': Content-Length is {} but only read {}",
+                .{ uri, content_length, total_received },
+            );
+            return error.ContentLengthMismatch;
+        }
     }
 
     try std.fs.cwd().rename(out_filepath_tmp, out_filepath);
@@ -1184,7 +1397,7 @@ pub fn cmdFetch(
     };
     defer fetch.deinit();
 
-    log.info("downloading '{s}'...", .{url});
+    log.info("cacheing '{s}'...", .{url});
     fetch.run() catch |err| switch (err) {
         error.OutOfMemory => errExit("out of memory", .{}),
         error.FetchFailed => {}, // error bundle checked below
