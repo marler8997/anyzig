@@ -104,6 +104,35 @@ fn readVerbosityFile() union(enum) {
     );
 }
 
+fn readAdHocVersionFile() ?VersionSpecifier {
+    const app_data_dir = global.getAppDataDir() catch return null;
+    const ad_hoc_version_path = std.fs.path.join(global.arena, &.{ app_data_dir, "ad-hoc-version" }) catch |e| oom(e);
+    defer global.arena.free(ad_hoc_version_path);
+    const content: []u8 = read_file: {
+        const file = std.fs.cwd().openFile(ad_hoc_version_path, .{}) catch |err| switch (err) {
+            error.FileNotFound => return null,
+            else => |e| std.debug.panic("open '{s}' failed with {s}", .{ ad_hoc_version_path, @errorName(e) }),
+        };
+        defer file.close();
+        break :read_file file.readToEndAlloc(global.arena, std.math.maxInt(usize)) catch |err| std.debug.panic(
+            "read '{s}' failed with {s}",
+            .{ ad_hoc_version_path, @errorName(err) },
+        );
+    };
+    defer global.arena.free(content);
+    const content_trimmed = std.mem.trimRight(u8, content, &std.ascii.whitespace);
+    if (VersionSpecifier.parse(content_trimmed)) |parsed_version| {
+        return parsed_version;
+    }
+
+    std.debug.panic(
+        "file '{s}' had the following unexpected content:\n" ++
+            "---\n{s}\n---\n" ++
+            "we expect the content to be a valid semantic version (e.g. 'master', '0.14.0')",
+        .{ ad_hoc_version_path, content },
+    );
+}
+
 fn anyzigLog(
     comptime level: std.log.Level,
     comptime scope: @Type(.enum_literal),
@@ -336,6 +365,9 @@ pub fn main() !void {
         break :blk options;
     };
 
+    // Resolve configured ad-hoc version
+    const ad_hoc_version: ?VersionSpecifier = readAdHocVersionFile();
+
     const version_specifier: VersionSpecifier, const is_init = blk: {
         if (maybe_command) |command| {
             if (std.mem.startsWith(u8, command, "-") and !std.mem.eql(u8, command, "-h") and !std.mem.eql(u8, command, "--help")) {
@@ -355,25 +387,39 @@ pub fn main() !void {
                     } else break :blk_is_help false;
                 };
 
+                // manual version gets priority over ad hoc version
                 if (manual_version) |version| break :blk .{ version, !is_help };
+                if (ad_hoc_version) |version| break :blk .{ version, !is_help };
                 try std.io.getStdErr().writer().print(
-                    "error: anyzig init requires a version, i.e. 'zig 0.13.0 {s}'\n",
+                    "error: anyzig init requires a version, you can:\n" ++
+                        "  1. run 'zig 0.13.0 {s}'\n" ++
+                        "  2. set an ad-hoc version using 'zig any set-ad-hoc-version VERSION'\n",
                     .{command},
                 );
                 std.process.exit(0xff);
             }
             if (std.mem.eql(u8, command, "any")) std.process.exit(try anyCommand(cmdline, cmdline_offset + 1));
         }
+
+        //   1. use manual version if specified
         if (manual_version) |version| break :blk .{ version, false };
-        const build_root = try findBuildRoot(arena, build_root_options) orelse {
-            try std.io.getStdErr().writeAll(
-                "no build.zig to pull a zig version from, you can:\n" ++
-                    "  1. run '" ++ exe_str ++ " VERSION' to specify a version\n" ++
-                    "  2. run from a directory where a build.zig can be found\n",
-            );
-            std.process.exit(0xff);
-        };
-        break :blk .{ .{ .semantic = try determineSemanticVersion(arena, build_root) }, false };
+
+        //   2. use project version (note: we intentionally fail if in a
+        //   project without a specified version)
+        if (try findBuildRoot(arena, build_root_options)) |build_root| {
+            break :blk .{ .{ .semantic = try determineSemanticVersion(arena, build_root) }, false };
+        }
+
+        //   3. fall back to ad hoc version when outside a project
+        if (ad_hoc_version) |version| break :blk .{ version, false };
+
+        try std.io.getStdErr().writeAll(
+            "no build.zig to pull a zig version from, you can:\n" ++
+                "  1. run '" ++ exe_str ++ " VERSION' to specify a version\n" ++
+                "  2. run from a directory where a build.zig can be found\n" ++
+                "  3. set an ad-hoc version using 'zig any set-ad-hoc-version VERSION'\n",
+        );
+        std.process.exit(0xff);
     };
 
     const app_data_path = try std.fs.getAppDataDir(arena, "anyzig");
@@ -545,10 +591,12 @@ fn anyCommandUsage() !u8 {
     try std.io.getStdErr().writer().print(
         "any" ++ @tagName(build_options.exe) ++ " {s} from https://github.com/marler8997/anyzig\n" ++
             "Here are the anyzig-specific subcommands:\n" ++
-            "  zig any set-verbosity LEVEL    | sets the default system-wide verbosity\n" ++
-            "                                 | accepts 'warn' or 'debug'\n" ++
-            "  zig any version                | print the version of anyzig to stdout\n" ++
-            "  zig any list-installed         | list all versions of zig installed in the global cache\n",
+            "  zig any set-verbosity LEVEL           | sets the default system-wide verbosity\n" ++
+            "                                        | accepts 'warn' or 'debug'\n" ++
+            "  zig any set-ad-hoc-version VERSION    | sets the version to use by default when outside a project directory\n" ++
+            "                                        | accepts a version specifier (e.g. 'master' or '0.15.2'\n" ++
+            "  zig any version                       | print the version of anyzig to stdout\n" ++
+            "  zig any list-installed                | list all versions of zig installed in the global cache\n",
         .{@embedFile("version")},
     );
     return 0xff;
@@ -592,6 +640,28 @@ fn anyCommand(cmdline: Cmdline, cmdline_offset: usize) !u8 {
             .no_app_data_dir => @panic("no app data dir?"),
             .no_file => @panic("no file after writing it?"),
             .loaded_from_file => |l| std.debug.assert(l == level),
+        }
+        return 0;
+    } else if (std.mem.eql(u8, command, "set-ad-hoc-version")) {
+        if (arg_offset >= cmdline.len()) errExit("missing VERSION", .{});
+        if (arg_offset + 1 < cmdline.len()) errExit("too many cmdline args", .{});
+        const version_str = cmdline.arg(arg_offset);
+        const version: VersionSpecifier = if (VersionSpecifier.parse(version_str)) |v| v else errExit("invalid VERSION '{s}'", .{version_str});
+        {
+            const app_data_dir = try global.getAppDataDir();
+            const version_path = std.fs.path.join(global.arena, &.{ app_data_dir, "ad-hoc-version" }) catch |e| oom(e);
+            defer global.arena.free(version_path);
+            if (std.fs.path.dirname(version_path)) |dir| {
+                try std.fs.cwd().makePath(dir);
+            }
+            const file = try std.fs.cwd().createFile(version_path, .{});
+            defer file.close();
+            try file.writer().print("{s}\n", .{version_str});
+        }
+        if (readAdHocVersionFile()) |v| {
+            std.debug.assert(v.eql(version));
+        } else {
+            @panic("no ad hoc version file after writing it?");
         }
         return 0;
     } else if (std.mem.eql(u8, command, "list-installed")) {
@@ -766,6 +836,12 @@ const VersionSpecifier = union(enum) {
             .zig => return if (std.mem.eql(u8, s, "master")) .master else null,
             .zls => return null,
         };
+    }
+    pub fn eql(self: VersionSpecifier, other: VersionSpecifier) bool {
+        switch (self) {
+            .master => return other == .master,
+            .semantic => |s| return other == .semantic and s.eql(other.semantic),
+        }
     }
 };
 
