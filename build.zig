@@ -316,7 +316,7 @@ fn addTests(
             .name = "test-any-set-ad-hoc-version-too-many",
             .input_dir = .no_input,
             .options = .nosetup,
-            .args = &.{ "any", "set-ad-hoc-version", "warn", "debug" },
+            .args = &.{ "any", "set-ad-hoc-version", "0.14.0", "0.15.2" },
         });
         t.run.expectStdErrEqual("anyzig: error: too many cmdline args\n");
     }
@@ -335,12 +335,12 @@ fn addTests(
         // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
         // TODO: override the appdata directory to run this test
         // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-        _ = test_factory.add(.{
-            .name = "test-any-set-ad-hoc-version-warn",
-            .input_dir = .no_input,
-            .options = .nosetup,
-            .args = &.{ "any", "set-ad-hoc-version", "0.14.0" },
-        });
+        // _ = test_factory.add(.{
+        //     .name = "test-any-set-ad-hoc-version-warn",
+        //     .input_dir = .no_input,
+        //     .options = .nosetup,
+        //     .args = &.{ "any", "set-ad-hoc-version", "0.14.0" },
+        // });
     }
 
     _ = test_factory.add(.{
