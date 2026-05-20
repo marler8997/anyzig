@@ -199,7 +199,9 @@ fn addTests(
         const run = b.addRunArtifact(anyzig);
         run.setName("anyzig init (no version)");
         run.addArg("init");
-        run.expectStdErrEqual("error: anyzig init requires a version, i.e. 'zig 0.13.0 init'\n");
+        run.expectStdErrEqual("error: anyzig init requires a version, you can:\n" ++
+            "  1. run 'zig 0.13.0 init'\n" ++
+            "  2. set an ad-hoc version using 'zig any set-ad-hoc-version VERSION'\n");
         test_step.dependOn(&run.step);
     }
 
@@ -244,6 +246,7 @@ fn addTests(
         ) });
         t.run.addCheck(.{ .expect_stderr_match = "zig any version" });
         t.run.addCheck(.{ .expect_stderr_match = "zig any set-verbosity" });
+        t.run.addCheck(.{ .expect_stderr_match = "zig any set-ad-hoc-version" });
     }
 
     {
@@ -295,6 +298,48 @@ fn addTests(
             .input_dir = .no_input,
             .options = .nosetup,
             .args = &.{ "any", "set-verbosity", "warn" },
+        });
+    }
+
+    {
+        const t = test_factory.add(.{
+            .name = "test-any-set-ad-hoc-version-none",
+            .input_dir = .no_input,
+            .options = .nosetup,
+            .args = &.{ "any", "set-ad-hoc-version" },
+        });
+        t.run.expectStdErrEqual("anyzig: error: missing VERSION\n");
+    }
+
+    {
+        const t = test_factory.add(.{
+            .name = "test-any-set-ad-hoc-version-too-many",
+            .input_dir = .no_input,
+            .options = .nosetup,
+            .args = &.{ "any", "set-ad-hoc-version", "warn", "debug" },
+        });
+        t.run.expectStdErrEqual("anyzig: error: too many cmdline args\n");
+    }
+
+    {
+        const t = test_factory.add(.{
+            .name = "test-any-set-ad-hoc-version-bad",
+            .input_dir = .no_input,
+            .options = .nosetup,
+            .args = &.{ "any", "set-ad-hoc-version", "whattheheck" },
+        });
+        t.run.expectStdErrEqual("anyzig: error: invalid VERSION 'whattheheck'\n");
+    }
+
+    {
+        // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+        // TODO: override the appdata directory to run this test
+        // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+        _ = test_factory.add(.{
+            .name = "test-any-set-ad-hoc-version-warn",
+            .input_dir = .no_input,
+            .options = .nosetup,
+            .args = &.{ "any", "set-ad-hoc-version", "0.14.0" },
         });
     }
 
