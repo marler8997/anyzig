@@ -939,7 +939,7 @@ fn extractMasterVersion(
         "download index is missing the 'master' version",
     );
     const version_val = master_obj.object.get("version") orelse errExit(
-        "download index \"master\" object is is missing the \"version\" property",
+        "download index \"master\" object is missing the \"version\" property",
         .{},
     );
     return SemanticVersion.parse(version_val.string) orelse errExit(

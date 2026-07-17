@@ -31,7 +31,7 @@ Mach is a game engine that provides a mirror to download the zig compiler as wel
 
 - provide a mechanism to list all available zig versions, maybe a way to clean them?
 - anyzig should participate in zig build progress reporting especially if it needs to fetch a new compiler version
-- make it easy to configure anyzig and share that configuration accross machines
+- make it easy to configure anyzig and share that configuration across machines
 - add a "hook" concept that allows the user to run a command for every new version of zig. anyzig should also track anytime it has run a hook for a new version of zig so that if a hook is added, it will re-run that hook for all existing zig versions.  Maybe also just add a "symlinks" directory option that anyzig will create symlinks for each compiler version.
 - add a configuration option to configure whether anyzig should try mach's download mirror or the official download links first
 
