@@ -1,6 +1,5 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const build_options = @import("build_options");
 const assert = std.debug.assert;
 const io = std.io;
 const fs = std.fs;
@@ -30,8 +29,6 @@ const Cmdline = @import("Cmdline.zig");
 pub const std_options: std.Options = .{
     .logFn = anyzigLog,
 };
-
-pub const exe_str = @tagName(build_options.exe);
 
 const Verbosity = enum {
     debug,
@@ -273,8 +270,8 @@ fn determineSemanticVersion(scratch: Allocator, build_root: BuildRoot) !Semantic
     }
 
     errExit(
-        "build.zig.zon is missing minimum_zig_version, either add it or run '{s} VERSION' to specify a version",
-        .{@tagName(build_options.exe)},
+        "build.zig.zon is missing minimum_zig_version, either add it or run 'zig VERSION' to specify a version",
+        .{},
     );
 
     // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
@@ -312,26 +309,25 @@ pub fn main() !void {
 
     const maybe_command: ?[]const u8 = if (cmdline_offset >= cmdline.len()) null else cmdline.arg(cmdline_offset);
 
+    // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+    // NOTE: I'm not sure if it should be "zig VERSION zls" or "zig zls VERSION"?
+    // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
     const build_root_options = blk: {
         var options: FindBuildRootOptions = .{};
-        switch (build_options.exe) {
-            .zig => {
-                if (maybe_command) |command| {
-                    if (std.mem.eql(u8, command, "build")) {
-                        var index: usize = cmdline_offset + 1;
-                        while (index < cmdline.len()) : (index += 1) {
-                            const arg = cmdline.arg(index);
-                            if (std.mem.eql(u8, arg, "--build-file")) {
-                                if (index == cmdline.len()) break;
-                                index += 1;
-                                options.build_file = cmdline.arg(index);
-                                log.info("build file '{s}'", .{options.build_file.?});
-                            }
-                        }
+        if (maybe_command) |command| {
+            if (std.mem.eql(u8, command, "build")) {
+                var index: usize = cmdline_offset + 1;
+                while (index < cmdline.len()) : (index += 1) {
+                    const arg = cmdline.arg(index);
+                    if (std.mem.eql(u8, arg, "--build-file")) {
+                        if (index == cmdline.len()) break;
+                        index += 1;
+                        options.build_file = cmdline.arg(index);
+                        log.info("build file '{s}'", .{options.build_file.?});
                     }
                 }
-            },
-            .zls => {},
+            }
         }
         break :blk options;
     };
@@ -345,7 +341,7 @@ pub fn main() !void {
                 );
                 std.process.exit(0xff);
             }
-            if (build_options.exe == .zig and (std.mem.eql(u8, command, "init") or std.mem.eql(u8, command, "init-exe") or std.mem.eql(u8, command, "init-lib"))) {
+            if (std.mem.eql(u8, command, "init") or std.mem.eql(u8, command, "init-exe") or std.mem.eql(u8, command, "init-lib")) {
                 const is_help = blk_is_help: {
                     var index: usize = cmdline_offset + 1;
                     while (index < cmdline.len()) : (index += 1) {
@@ -368,7 +364,7 @@ pub fn main() !void {
         const build_root = try findBuildRoot(arena, build_root_options) orelse {
             try std.io.getStdErr().writeAll(
                 "no build.zig to pull a zig version from, you can:\n" ++
-                    "  1. run '" ++ exe_str ++ " VERSION' to specify a version\n" ++
+                    "  1. run 'zig VERSION' to specify a version\n" ++
                     "  2. run from a directory where a build.zig can be found\n",
             );
             std.process.exit(0xff);
@@ -400,6 +396,8 @@ pub fn main() !void {
     if (version_specifier == .master) {
         std.log.info("master is at {}", .{semantic_version});
     }
+
+    if (true) @panic("todo: see if this is a 'zig zls' command");
 
     const hashstore_path = try std.fs.path.join(arena, &.{ app_data_path, "hashstore" });
     // no need to free
