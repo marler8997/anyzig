@@ -13,7 +13,7 @@ jobs:
     runs-on: ${{matrix.os}}
     steps:
       - uses: actions/checkout@v4
-      - uses: mlugg/setup-zig@v2
+      - uses: marler8997/setup-anyzig@master
       - run: |
           zig build ci --summary all
       - if: ${{ matrix.os == 'ubuntu-latest' }}
