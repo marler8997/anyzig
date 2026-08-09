@@ -548,7 +548,9 @@ fn anyCommandUsage() !u8 {
             "  zig any set-verbosity LEVEL    | sets the default system-wide verbosity\n" ++
             "                                 | accepts 'warn' or 'debug'\n" ++
             "  zig any version                | print the version of anyzig to stdout\n" ++
-            "  zig any list-installed         | list all versions of zig installed in the global cache\n",
+            "  zig any list-installed         | list all versions of zig installed in the global cache\n" ++
+            "  zig any uninstall VERSIONS     | uninstall provided zig installations\n" ++
+            "                                 | accepts semver names only\n",
         .{@embedFile("version")},
     );
     return 0xff;
@@ -598,7 +600,67 @@ fn anyCommand(cmdline: Cmdline, cmdline_offset: usize) !u8 {
         if (arg_offset < cmdline.len()) errExit("the 'list-installed' subcommand does not take any cmdline args", .{});
         try listInstalled();
         return 0;
+    } else if (std.mem.eql(u8, command, "uninstall")) {
+        if (arg_offset >= cmdline.len()) errExit("missing VERSION(S)", .{});
+        var versions: std.ArrayListUnmanaged(SemanticVersion) = try .initCapacity(global.arena, 1);
+        defer versions.deinit(global.arena);
+
+        var offset = arg_offset;
+        while (offset < cmdline.len()) {
+            defer offset += 1;
+
+            const maybe_version = VersionSpecifier.parse(cmdline.arg(offset)) orelse
+                errExit("{s} is not a valid zig version", .{cmdline.arg(offset)});
+
+            switch (maybe_version) {
+                .semantic => |s| try versions.append(global.arena, s),
+                .master => errExit("the 'uninstall' subcommand only accepts semantic versions", .{}),
+            }
+        }
+        for (versions.items) |version| {
+            if (uninstallVersion(version)) {
+                log.info("version {} was successfully uninstalled", .{version});
+            } else |e| {
+                log.err("version {} could not be uninstalled: {}", .{ version, e });
+            }
+        }
+        return 0;
     } else errExit("unknown zig any '{s}' command", .{command});
+}
+
+fn uninstallVersion(semantic_version: SemanticVersion) !void {
+    const app_data_dir = try global.getAppDataDir();
+    const hashstore_path = try std.fs.path.join(global.arena, &.{ app_data_dir, "hashstore" });
+    const hashstore_name = std.fmt.allocPrint(global.arena, exe_str ++ "-{}", .{semantic_version}) catch |e| oom(e);
+    defer global.arena.free(hashstore_name);
+    const hash = maybeHashAndPath(try hashstore.find(hashstore_path, hashstore_name)) orelse return error.DoesNotExist;
+
+    const override_global_cache_dir: ?[]const u8 = try EnvVar.ZIG_GLOBAL_CACHE_DIR.get(global.arena);
+    var global_cache_directory: Directory = l: {
+        const p = override_global_cache_dir orelse try introspect.resolveGlobalCacheDir(global.arena);
+        break :l .{
+            .handle = try fs.cwd().makeOpenPath(p, .{}),
+            .path = p,
+        };
+    };
+
+    if (global_cache_directory.handle.access(hash.path(), .{})) {
+        var lf = try LockFile.lock(hash.path());
+        defer lf.unlock();
+
+        try global_cache_directory.handle.deleteTree(hash.path());
+    } else |_| {
+        log.info(
+            "{s} does not exist in the global cache at path {s}",
+            .{ hashstore_name, hash.path() },
+        );
+        log.info("removing from anyzig store only", .{});
+    }
+
+    // delete version from hash store whether it was in the global cache or not,
+    // it may have been manually deleted or otherwise isn't
+    // accurately tracked by anyzig
+    try hashstore.delete(hashstore_path, hashstore_name);
 }
 
 fn listInstalled() !void {
