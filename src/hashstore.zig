@@ -90,6 +90,7 @@ const ReverseLookup = std.AutoHashMapUnmanaged(
     std.ArrayListUnmanaged(anyzig.SemanticVersion),
 );
 pub fn allocReverseLookup(
+    exe: anyzig.Exe,
     hashstore_path: []const u8,
     allocator: std.mem.Allocator,
 ) !ReverseLookup {
@@ -97,7 +98,9 @@ pub fn allocReverseLookup(
     defer dir.close();
     var map: ReverseLookup = .{};
     var it = dir.iterate();
-    const prefix = anyzig.exe_str ++ "-";
+    const prefix = switch (exe) {
+        inline else => |e| @tagName(e) ++ "-",
+    };
     while (try it.next()) |entry| {
         if (entry.kind != .file) continue;
         if (!std.mem.startsWith(u8, entry.name, prefix)) continue;

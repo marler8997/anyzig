@@ -1,6 +1,5 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const build_options = @import("build_options");
 const assert = std.debug.assert;
 const io = std.io;
 const fs = std.fs;
@@ -31,7 +30,24 @@ pub const std_options: std.Options = .{
     .logFn = anyzigLog,
 };
 
-pub const exe_str = @tagName(build_options.exe);
+pub const Exe = enum {
+    zig,
+    zls,
+    /// anyzig runs in zls mode when invoked as "zls" (i.e. via a symlink) or as "zig zls ..."
+    fn fromCmdline(cmdline: Cmdline) struct { Exe, usize } {
+        if (isZlsName(cmdline.arg(0))) return .{ .zls, 1 };
+        if (cmdline.len() >= 2 and std.mem.eql(u8, cmdline.arg(1), "zls")) return .{ .zls, 2 };
+        return .{ .zig, 1 };
+    }
+};
+
+fn isZlsName(arg0: []const u8) bool {
+    const stem = std.fs.path.stem(arg0);
+    return switch (builtin.os.tag) {
+        .windows => std.ascii.eqlIgnoreCase(stem, "zls"),
+        else => std.mem.eql(u8, stem, "zls"),
+    };
+}
 
 const Verbosity = enum {
     debug,
@@ -240,7 +256,7 @@ fn isMachVersion(v: SemanticVersion) bool {
     return false;
 }
 
-fn determineSemanticVersion(scratch: Allocator, build_root: BuildRoot) !SemanticVersion {
+fn determineSemanticVersion(scratch: Allocator, exe: Exe, build_root: BuildRoot) !SemanticVersion {
     const zon = try loadBuildZigZon(scratch, build_root) orelse {
         log.err("TODO: no build.zig.zon file, maybe try determining zig version from build.zig?", .{});
         std.process.exit(0xff);
@@ -274,7 +290,7 @@ fn determineSemanticVersion(scratch: Allocator, build_root: BuildRoot) !Semantic
 
     errExit(
         "build.zig.zon is missing minimum_zig_version, either add it or run '{s} VERSION' to specify a version",
-        .{@tagName(build_options.exe)},
+        .{@tagName(exe)},
     );
 
     // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
@@ -303,18 +319,21 @@ pub fn main() !void {
     const cmdline: Cmdline = try .alloc(arena);
     defer cmdline.free(arena);
 
+    const exe: Exe, const exe_offset: usize = Exe.fromCmdline(cmdline);
+    const exe_str = @tagName(exe);
+
     const cmdline_offset: usize, const manual_version: ?VersionSpecifier = blk: {
-        if (cmdline.len() >= 2) {
-            if (VersionSpecifier.parse(cmdline.arg(1))) |v| break :blk .{ 2, v };
+        if (cmdline.len() > exe_offset) {
+            if (VersionSpecifier.parse(exe, cmdline.arg(exe_offset))) |v| break :blk .{ exe_offset + 1, v };
         }
-        break :blk .{ 1, null };
+        break :blk .{ exe_offset, null };
     };
 
     const maybe_command: ?[]const u8 = if (cmdline_offset >= cmdline.len()) null else cmdline.arg(cmdline_offset);
 
     const build_root_options = blk: {
         var options: FindBuildRootOptions = .{};
-        switch (build_options.exe) {
+        switch (exe) {
             .zig => {
                 if (maybe_command) |command| {
                     if (std.mem.eql(u8, command, "build")) {
@@ -345,7 +364,7 @@ pub fn main() !void {
                 );
                 std.process.exit(0xff);
             }
-            if (build_options.exe == .zig and (std.mem.eql(u8, command, "init") or std.mem.eql(u8, command, "init-exe") or std.mem.eql(u8, command, "init-lib"))) {
+            if (exe == .zig and (std.mem.eql(u8, command, "init") or std.mem.eql(u8, command, "init-exe") or std.mem.eql(u8, command, "init-lib"))) {
                 const is_help = blk_is_help: {
                     var index: usize = cmdline_offset + 1;
                     while (index < cmdline.len()) : (index += 1) {
@@ -362,18 +381,19 @@ pub fn main() !void {
                 );
                 std.process.exit(0xff);
             }
-            if (std.mem.eql(u8, command, "any")) std.process.exit(try anyCommand(cmdline, cmdline_offset + 1));
+            if (std.mem.eql(u8, command, "any")) std.process.exit(try anyCommand(exe, cmdline, cmdline_offset + 1));
         }
         if (manual_version) |version| break :blk .{ version, false };
         const build_root = try findBuildRoot(arena, build_root_options) orelse {
-            try std.io.getStdErr().writeAll(
+            try std.io.getStdErr().writer().print(
                 "no build.zig to pull a zig version from, you can:\n" ++
-                    "  1. run '" ++ exe_str ++ " VERSION' to specify a version\n" ++
+                    "  1. run '{s} VERSION' to specify a version\n" ++
                     "  2. run from a directory where a build.zig can be found\n",
+                .{exe_str},
             );
             std.process.exit(0xff);
         };
-        break :blk .{ .{ .semantic = try determineSemanticVersion(arena, build_root) }, false };
+        break :blk .{ .{ .semantic = try determineSemanticVersion(arena, exe, build_root) }, false };
     };
 
     const app_data_path = try std.fs.getAppDataDir(arena, "anyzig");
@@ -405,7 +425,7 @@ pub fn main() !void {
     // no need to free
     try hashstore.init(hashstore_path);
 
-    const hashstore_name = std.fmt.allocPrint(arena, exe_str ++ "-{}", .{semantic_version}) catch |e| oom(e);
+    const hashstore_name = std.fmt.allocPrint(arena, "{s}-{}", .{ exe_str, semantic_version }) catch |e| oom(e);
     // no need to free
 
     const maybe_hash = maybeHashAndPath(try hashstore.find(hashstore_path, hashstore_name));
@@ -425,7 +445,7 @@ pub fn main() !void {
             if (global_cache_directory.handle.access(hash.path(), .{})) |_| {
                 log.info(
                     "{s} '{}' already exists at '{}{s}'",
-                    .{ @tagName(build_options.exe), semantic_version, global_cache_directory, hash.path() },
+                    .{ exe_str, semantic_version, global_cache_directory, hash.path() },
                 );
                 break :blk hash;
             } else |err| switch (err) {
@@ -434,7 +454,7 @@ pub fn main() !void {
             }
         }
 
-        const url = try getVersionUrl(arena, app_data_path, semantic_version);
+        const url = try getVersionUrl(arena, exe, app_data_path, semantic_version);
         defer url.deinit(arena);
         const hash = hashAndPath(try cmdFetch(
             gpa,
@@ -541,22 +561,22 @@ pub fn main() !void {
     }
 }
 
-fn anyCommandUsage() !u8 {
+fn anyCommandUsage(exe: Exe) !u8 {
     try std.io.getStdErr().writer().print(
-        "any" ++ @tagName(build_options.exe) ++ " {s} from https://github.com/marler8997/anyzig\n" ++
+        "any{s} {s} from https://github.com/marler8997/anyzig\n" ++
             "Here are the anyzig-specific subcommands:\n" ++
             "  zig any set-verbosity LEVEL    | sets the default system-wide verbosity\n" ++
             "                                 | accepts 'warn' or 'debug'\n" ++
             "  zig any version                | print the version of anyzig to stdout\n" ++
             "  zig any list-installed         | list all versions of zig installed in the global cache\n",
-        .{@embedFile("version")},
+        .{ @tagName(exe), @embedFile("version") },
     );
     return 0xff;
 }
 
-fn anyCommand(cmdline: Cmdline, cmdline_offset: usize) !u8 {
+fn anyCommand(exe: Exe, cmdline: Cmdline, cmdline_offset: usize) !u8 {
     if (cmdline_offset == cmdline.len()) {
-        std.process.exit(try anyCommandUsage());
+        std.process.exit(try anyCommandUsage(exe));
     }
     const command = cmdline.arg(cmdline_offset);
     const arg_offset = cmdline_offset + 1;
@@ -596,18 +616,19 @@ fn anyCommand(cmdline: Cmdline, cmdline_offset: usize) !u8 {
         return 0;
     } else if (std.mem.eql(u8, command, "list-installed")) {
         if (arg_offset < cmdline.len()) errExit("the 'list-installed' subcommand does not take any cmdline args", .{});
-        try listInstalled();
+        try listInstalled(exe);
         return 0;
     } else errExit("unknown zig any '{s}' command", .{command});
 }
 
-fn listInstalled() !void {
+fn listInstalled(exe: Exe) !void {
+    const exe_str = @tagName(exe);
     const app_data_dir = try global.getAppDataDir();
 
     const hashstore_path = try std.fs.path.join(global.arena, &.{ app_data_dir, "hashstore" });
     // no need to free
     try hashstore.init(hashstore_path);
-    const reverse_lookup = try hashstore.allocReverseLookup(hashstore_path, global.arena);
+    const reverse_lookup = try hashstore.allocReverseLookup(exe, hashstore_path, global.arena);
 
     const override_global_cache_dir: ?[]const u8 = try EnvVar.ZIG_GLOBAL_CACHE_DIR.get(global.arena);
     const global_cache_dir_path = override_global_cache_dir orelse try introspect.resolveGlobalCacheDir(global.arena);
@@ -640,7 +661,9 @@ fn listInstalled() !void {
         const exe_path = try std.fs.path.join(global.arena, &.{
             p_path,
             entry.name,
-            comptime exe_str ++ builtin.target.exeFileExt(),
+            switch (exe) {
+                inline else => |e| @tagName(e) ++ comptime builtin.target.exeFileExt(),
+            },
         });
         std.fs.cwd().access(exe_path, .{}) catch |err| switch (err) {
             error.FileNotFound => continue,
@@ -659,7 +682,7 @@ fn listInstalled() !void {
         }
         const version_str = std.mem.trimRight(u8, child_stdout, "\r\n");
         const semantic_version = SemanticVersion.parse(version_str) orelse continue;
-        const hashstore_name = std.fmt.allocPrint(global.arena, exe_str ++ "-{}", .{semantic_version}) catch |e| oom(e);
+        const hashstore_name = std.fmt.allocPrint(global.arena, "{s}-{}", .{ exe_str, semantic_version }) catch |e| oom(e);
         defer global.arena.free(hashstore_name);
         const maybe_hash = maybeHashAndPath(try hashstore.find(hashstore_path, hashstore_name));
         if (maybe_hash) |*anyzig_store_hash| {
@@ -760,9 +783,9 @@ pub const SemanticVersion = struct {
 const VersionSpecifier = union(enum) {
     master,
     semantic: SemanticVersion,
-    pub fn parse(s: []const u8) ?VersionSpecifier {
+    pub fn parse(exe: Exe, s: []const u8) ?VersionSpecifier {
         if (SemanticVersion.parse(s)) |v| return .{ .semantic = v };
-        return switch (build_options.exe) {
+        return switch (exe) {
             .zig => return if (std.mem.eql(u8, s, "master")) .master else null,
             .zls => return null,
         };
@@ -875,10 +898,11 @@ fn makeOfficialUrl(arena: Allocator, semantic_version: SemanticVersion) Download
 
 fn getVersionUrl(
     arena: Allocator,
+    exe: Exe,
     app_data_path: []const u8,
     semantic_version: SemanticVersion,
 ) !DownloadUrl {
-    if (build_options.exe == .zls) return DownloadUrl.initOfficial(std.fmt.allocPrint(
+    if (exe == .zls) return DownloadUrl.initOfficial(std.fmt.allocPrint(
         arena,
         "https://builds.zigtools.org/zls-{s}-{}.{s}",
         .{ switch (determineVersionKind(semantic_version)) {

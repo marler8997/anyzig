@@ -2,8 +2,6 @@ const builtin = @import("builtin");
 const std = @import("std");
 const zig = @import("zig");
 
-const Exe = enum { zig, zls };
-
 pub fn build(b: *std.Build) !void {
     const zig_dep = b.dependency("zig", .{});
 
@@ -56,7 +54,6 @@ pub fn build(b: *std.Build) !void {
                 },
             }),
         });
-        setBuildOptions(b, exe, .zig);
         const install = b.addInstallArtifact(exe, .{});
         b.getInstallStep().dependOn(&install.step);
 
@@ -66,33 +63,16 @@ pub fn build(b: *std.Build) !void {
             run.addArgs(args);
         }
         b.step("run", "").dependOn(&run.step);
+
+        const run_zls = b.addRunArtifact(exe);
+        run_zls.step.dependOn(&install.step);
+        run_zls.addArg("zls");
+        if (b.args) |args| {
+            run_zls.addArgs(args);
+        }
+        b.step("zls", "").dependOn(&run_zls.step);
         break :blk exe;
     };
-
-    {
-        const exe = b.addExecutable(.{
-            .name = "zls",
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("src/main.zig"),
-                .target = target,
-                .optimize = optimize,
-                .single_threaded = true,
-                .imports = &.{
-                    .{ .name = "zig", .module = zig_mod },
-                    .{ .name = "version", .module = dev_version_embed },
-                },
-            }),
-        });
-        setBuildOptions(b, exe, .zls);
-        const install = b.addInstallArtifact(exe, .{});
-
-        const run = b.addRunArtifact(exe);
-        run.step.dependOn(&install.step);
-        if (b.args) |args| {
-            run.addArgs(args);
-        }
-        b.step("zls", "").dependOn(&run.step);
-    }
 
     const test_step = b.step("test", "");
     addTests(b, dev_version, anyzig, test_step, .{ .make_build_steps = true });
@@ -159,12 +139,6 @@ fn makeCalVersion() ![11]u8 {
     return buf;
 }
 
-fn setBuildOptions(b: *std.Build, exe: *std.Build.Step.Compile, exe_kind: Exe) void {
-    const o = b.addOptions();
-    o.addOption(Exe, "exe", exe_kind);
-    exe.root_module.addOptions("build_options", o);
-}
-
 const SharedTestOptions = struct {
     make_build_steps: bool,
     failing_to_execute_foreign_is_an_error: bool = true,
@@ -192,6 +166,25 @@ fn addTests(
         run.setName("anyzig -no-command");
         run.addArg("-no-command");
         run.expectStdErrEqual("error: expected a command but got '-no-command'\n");
+        test_step.dependOn(&run.step);
+    }
+
+    {
+        const run = b.addRunArtifact(anyzig);
+        run.setName("anyzig zls -no-command");
+        run.addArgs(&.{ "zls", "-no-command" });
+        run.expectStdErrEqual("error: expected a command but got '-no-command'\n");
+        test_step.dependOn(&run.step);
+    }
+
+    {
+        const run = b.addRunArtifact(anyzig);
+        run.setName("anyzig zls any");
+        run.addArgs(&.{ "zls", "any" });
+        run.addCheck(.{ .expect_stderr_match = b.fmt(
+            "anyzls {s} from https://github.com/marler8997/anyzig\n",
+            .{version},
+        ) });
         test_step.dependOn(&run.step);
     }
 
@@ -663,26 +656,8 @@ fn ci(
                 },
             }),
         });
-        setBuildOptions(b, zig_exe, .zig);
         install_exes.dependOn(
             &b.addInstallArtifact(zig_exe, .{ .dest_dir = .{ .override = target_dest_dir } }).step,
-        );
-        const zls_exe = b.addExecutable(.{
-            .name = "zls",
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("src/main.zig"),
-                .target = target,
-                .optimize = optimize,
-                .single_threaded = true,
-                .imports = &.{
-                    .{ .name = "zig", .module = zig_mod },
-                    .{ .name = "version", .module = release_version_embed },
-                },
-            }),
-        });
-        setBuildOptions(b, zls_exe, .zls);
-        install_exes.dependOn(
-            &b.addInstallArtifact(zls_exe, .{ .dest_dir = .{ .override = target_dest_dir } }).step,
         );
 
         const target_test_step = b.step(b.fmt("test-{s}", .{ci_target_str}), "");
@@ -721,9 +696,6 @@ fn makeCiArchiveStep(
 ) *std.Build.Step {
     const install_path = b.getInstallPath(.prefix, ".");
 
-    // not sure yet if we want to include zls.exe in our archives?
-    const include_zls = false;
-
     if (target.os.tag == .windows) {
         const out_zip_file = b.pathJoin(&.{
             install_path,
@@ -733,10 +705,6 @@ fn makeCiArchiveStep(
         zip.addArg(out_zip_file);
         zip.addArg("zig.exe");
         zip.addArg("zig.pdb");
-        if (include_zls) {
-            zip.addArg("zls.exe");
-            zip.addArg("zls.pdb");
-        }
         zip.cwd = .{ .cwd_relative = b.getInstallPath(
             target_install_dir,
             ".",
@@ -755,9 +723,6 @@ fn makeCiArchiveStep(
         targz,
         "zig",
     });
-    if (include_zls) {
-        tar.addArg("zls");
-    }
     tar.cwd = .{ .cwd_relative = b.getInstallPath(
         target_install_dir,
         ".",
