@@ -97,12 +97,24 @@ pub fn build(b: *std.Build) !void {
     const test_step = b.step("test", "");
     addTests(b, dev_version, anyzig, test_step, .{ .make_build_steps = true });
     {
-        const unit_tests = b.addRunArtifact(b.addTest(.{
-            .root_source_file = b.path("src/TmpFile.zig"),
-            .target = b.graph.host,
-        }));
-        b.step("unit-test", "Run the unit tests").dependOn(&unit_tests.step);
-        test_step.dependOn(&unit_tests.step);
+        const unit_test_step = b.step("unit-test", "Run the unit tests");
+        for ([_][]const u8{ "src/TmpFile.zig", "src/ldwin32.zig" }) |path| {
+            const unit_tests = b.addRunArtifact(b.addTest(.{
+                .root_source_file = b.path(path),
+                .target = b.graph.host,
+            }));
+            unit_test_step.dependOn(&unit_tests.step);
+            test_step.dependOn(&unit_tests.step);
+        }
+    }
+    {
+        const ldwin32_test_step = b.step("test-ldwin32", "Run the ldwin32 (exec on Windows) tests");
+        addLdwin32Tests(b, ldwin32_test_step, optimize, b.option(
+            []const []const u8,
+            "ldwin32-zig-exe",
+            "Also test exec'ing this zig exe in the ldwin32 tests (absolute path, repeatable)",
+        ) orelse &.{});
+        test_step.dependOn(ldwin32_test_step);
     }
 
     const zip_dep = b.dependency("zip", .{});
@@ -900,4 +912,156 @@ fn makeReleaseArchiveStep(
     ) };
     tar.step.dependOn(install_exes);
     return &tar.step;
+}
+
+/// Tests for src/ldwin32.zig (Windows exec): programs exec'd through a launcher must
+/// be indistinguishable from running them directly, and every assumption ldwin32
+/// checks must be rejected when it's violated.
+fn addLdwin32Tests(
+    b: *std.Build,
+    test_step: *std.Build.Step,
+    optimize: std.builtin.OptimizeMode,
+    zig_exes: []const []const u8,
+) void {
+    if (builtin.os.tag != .windows or builtin.cpu.arch != .x86_64) return;
+    const host = b.graph.host;
+    const ldwin32 = b.createModule(.{ .root_source_file = b.path("src/ldwin32.zig") });
+
+    const compare = b.addExecutable(.{ .name = "ldwin32-compare", .root_module = b.createModule(.{
+        .root_source_file = b.path("test/ldwin32/compare.zig"),
+        .target = host,
+        .optimize = optimize,
+    }) });
+
+    // anyzig is single-threaded, which changes how TLS is set up, so test both
+    var launchers: [2]*std.Build.Step.Compile = undefined;
+    for (&launchers, [_]bool{ false, true }) |*launcher, single_threaded| {
+        launcher.* = b.addExecutable(.{
+            .name = if (single_threaded) "ldwin32-launcher-st" else "ldwin32-launcher",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("test/ldwin32/launcher.zig"),
+                .target = host,
+                .optimize = optimize,
+                .single_threaded = single_threaded,
+                .imports = &.{.{ .name = "ldwin32", .module = ldwin32 }},
+            }),
+        });
+    }
+
+    const compare_args = [_][]const u8{ "a", "b c", "", "d\"e", "f\\\\", "--exit", "42" };
+    const probes = [_]*std.Build.Step.Compile{
+        addLdwin32Probe(b, .{ .name = "probe", .optimize = optimize }),
+        addLdwin32Probe(b, .{ .name = "probe-libc", .optimize = optimize, .link_libc = true }),
+    };
+    for (launchers) |launcher| {
+        for (probes) |probe| {
+            const run = addLdwin32Compare(b, test_step, compare, launcher, probe.getEmittedBin(), &compare_args);
+            run.setName(b.fmt("ldwin32 compare {s} {s}", .{ launcher.name, probe.name }));
+        }
+        // a real zig: the one running this build, plus any passed with -Dldwin32-zig-exe
+        const all_zig_exes = std.mem.concat(b.allocator, []const u8, &.{ &.{b.graph.zig_exe}, zig_exes }) catch @panic("OOM");
+        for (all_zig_exes) |zig_exe| {
+            for ([_][]const u8{ "version", "env" }) |cmd| {
+                const run = addLdwin32Compare(b, test_step, compare, launcher, .{ .cwd_relative = zig_exe }, &.{cmd});
+                run.setName(b.fmt("ldwin32 compare {s} {s} {s}", .{ launcher.name, zig_exe, cmd }));
+            }
+        }
+    }
+
+    const Reject = struct {
+        name: []const u8,
+        probe: ?Ldwin32ProbeOptions = null,
+        dll: bool = false,
+        arg: ?[]const u8 = null,
+        hook: ?[]const u8 = null,
+        expect: []const u8,
+    };
+    const rejects = [_]Reject{
+        .{ .name = "relative path", .arg = "probe.exe", .expect = "is not absolute" },
+        .{ .name = "dll", .dll = true, .expect = "is a DLL" },
+        .{ .name = "arm64", .probe = .{ .name = "probe-arm64", .arch = .aarch64 }, .expect = "expected x86_64" },
+        .{ .name = "gui subsystem", .probe = .{ .name = "probe-gui", .subsystem = .Windows }, .expect = "has subsystem 2 but the launcher has 3" },
+        .{ .name = "manifest", .probe = .{ .name = "probe-manifest", .manifest = true }, .expect = "has an application manifest" },
+        .{ .name = "fixed base", .probe = .{ .name = "probe-fixedbase", .dynamicbase = false }, .expect = "is not relocatable" },
+        .{ .name = "kernel image api", .probe = .{ .name = "probe-badapi", .bad_api = true }, .expect = "!QueryFullProcessImageNameW, which would report the launcher" },
+        .{ .name = "thread", .hook = "thread", .expect = "is running, exec would leave it running" },
+        .{ .name = "ucrt argv", .hook = "ucrt-argv", .expect = "ucrtbase.dll has already parsed argv" },
+        .{ .name = "msvcrt argv", .hook = "msvcrt-argv", .expect = "msvcrt.dll has already parsed argv" },
+        .{ .name = "environment", .hook = "env", .expect = "'s environment is out of date at 'LDWIN32_TEST_ADDED=1'" },
+    };
+    const default_probe = addLdwin32Probe(b, .{ .name = "probe-reject", .optimize = optimize });
+    const probe_dll = b.addSharedLibrary(.{ .name = "probe-dll", .root_module = b.createModule(.{
+        .root_source_file = b.path("test/ldwin32/probe_dll.zig"),
+        .target = host,
+        .optimize = optimize,
+    }) });
+    for (rejects) |reject| {
+        // the multi-threaded launcher, the thread hook needs it
+        const run = b.addRunArtifact(launchers[0]);
+        run.setName(b.fmt("ldwin32 reject {s}", .{reject.name}));
+        if (reject.arg) |arg| {
+            run.addArg(arg);
+        } else if (reject.dll) {
+            run.addArtifactArg(probe_dll);
+        } else if (reject.probe) |p| {
+            var opt = p;
+            opt.optimize = optimize;
+            run.addArtifactArg(addLdwin32Probe(b, opt));
+        } else {
+            run.addArtifactArg(default_probe);
+        }
+        if (reject.hook) |hook| run.setEnvironmentVariable("LDWIN32_TEST_HOOK", hook);
+        run.expectExitCode(0xff);
+        run.addCheck(.{ .expect_stderr_match = reject.expect });
+        test_step.dependOn(&run.step);
+    }
+}
+
+const Ldwin32ProbeOptions = struct {
+    name: []const u8,
+    optimize: std.builtin.OptimizeMode = .Debug,
+    link_libc: bool = false,
+    arch: ?std.Target.Cpu.Arch = null,
+    subsystem: ?std.Target.SubSystem = null,
+    manifest: bool = false,
+    dynamicbase: bool = true,
+    bad_api: bool = false,
+};
+
+fn addLdwin32Probe(b: *std.Build, opt: Ldwin32ProbeOptions) *std.Build.Step.Compile {
+    const options = b.addOptions();
+    options.addOption(bool, "bad_api", opt.bad_api);
+    const target = if (opt.arch) |arch| b.resolveTargetQuery(.{ .cpu_arch = arch, .os_tag = .windows }) else b.graph.host;
+    const exe = b.addExecutable(.{
+        .name = b.fmt("ldwin32-{s}", .{opt.name}),
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/ldwin32/probe.zig"),
+            .target = target,
+            .optimize = opt.optimize,
+            .link_libc = opt.link_libc,
+            .imports = &.{.{ .name = "probe_options", .module = options.createModule() }},
+        }),
+        .win32_manifest = if (opt.manifest) b.path("test/ldwin32/probe.manifest") else null,
+    });
+    exe.subsystem = opt.subsystem;
+    exe.linker_dynamicbase = opt.dynamicbase;
+    return exe;
+}
+
+fn addLdwin32Compare(
+    b: *std.Build,
+    test_step: *std.Build.Step,
+    compare: *std.Build.Step.Compile,
+    launcher: *std.Build.Step.Compile,
+    exe: std.Build.LazyPath,
+    args: []const []const u8,
+) *std.Build.Step.Run {
+    const run = b.addRunArtifact(compare);
+    run.addArtifactArg(launcher);
+    run.addFileArg(exe);
+    run.addArgs(args);
+    // the exe's output is what's compared, so it always has to run
+    run.has_side_effects = true;
+    test_step.dependOn(&run.step);
+    return run;
 }
