@@ -60,6 +60,8 @@ pub fn main() !u8 {
     try std.posix.chdirZ(output_dir);
 
     var env = try std.process.getEnvMap(arena);
+    // on Windows, fail if anyzig can't exec zig in-process (instead of spawning it)
+    if (builtin.os.tag == .windows) try env.put("ANYZIG_TEST_REQUIRE_EXEC", "1");
     if (global_cache_dir) |dir| try env.put("ZIG_GLOBAL_CACHE_DIR", dir);
     if (offline) {
         // point the http proxies at a dead port so any attempt to use the network fails

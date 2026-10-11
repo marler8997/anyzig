@@ -26,9 +26,12 @@ pub const log = std.log;
 const hashstore = @import("hashstore.zig");
 const Cmdline = @import("Cmdline.zig");
 const TmpFile = @import("TmpFile.zig");
+const ldwin32 = @import("ldwin32.zig");
 
 pub const std_options: std.Options = .{
     .logFn = anyzigLog,
+    // ldwin32.exec requires it, the handler would outlive the exec and catch zig's crashes
+    .enable_segfault_handler = if (ldwin32.supported) false else std.debug.default_enable_segfault_handler,
 };
 
 pub const exe_str = @tagName(build_options.exe);
@@ -464,8 +467,23 @@ pub fn main() !void {
         break :blk hash;
     };
 
-    const versioned_exe = try global_cache_directory.joinZ(arena, &.{ hash.path(), exe_str });
+    const versioned_exe = try global_cache_directory.joinZ(arena, &.{ hash.path(), exe_str ++ comptime builtin.target.exeFileExt() });
     defer arena.free(versioned_exe);
+
+    if (ldwin32.supported and !is_init) {
+        // Windows has no execve, ldwin32 provides one that replaces this program with
+        // zig in the same process, saving the cost of creating a second one. If one of
+        // its requirements isn't met it logs why and leaves the process unmodified,
+        // and we fall back to running zig as a child process.
+        const versioned_exe_w = try std.unicode.wtf8ToWtf16LeAllocZ(arena, versioned_exe);
+        // remove the version argument, if there is one
+        switch (ldwin32.exec(versioned_exe_w, .{ .start = 1, .count = cmdline_offset - 1 })) {
+            error.ExecFailed => if (std.process.hasEnvVarConstant("ANYZIG_TEST_REQUIRE_EXEC")) {
+                log.err("exec failed and ANYZIG_TEST_REQUIRE_EXEC is set", .{});
+                process.exit(0xff);
+            },
+        }
+    }
 
     const stay_alive = is_init or (builtin.os.tag == .windows);
 
