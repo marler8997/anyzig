@@ -6,6 +6,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: mlugg/setup-zig@v2
+      - name: install hotpath-check dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y strace valgrind
       - run: |
           zig build release --summary all
       - name: getversion
