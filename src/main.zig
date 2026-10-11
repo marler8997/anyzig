@@ -480,9 +480,18 @@ pub fn main() !void {
         }
         var child: std.process.Child = .init(al.items, arena);
         try child.spawn();
-        const result = try child.wait();
-        switch (result) {
-            .Exited => |code| if (code != 0) std.process.exit(0xff),
+        if (builtin.os.tag == .windows) {
+            // std.process.Child.wait truncates the exit code to a u8 (e.g. 0xC0000005 => 5)
+            // so we wait for the child ourselves to forward its full exit code
+            try std.os.windows.WaitForSingleObjectEx(child.id, std.os.windows.INFINITE, false);
+            var code: std.os.windows.DWORD = undefined;
+            if (std.os.windows.kernel32.GetExitCodeProcess(child.id, &code) == 0) std.debug.panic(
+                "GetExitCodeProcess failed, error={}",
+                .{@intFromEnum(std.os.windows.GetLastError())},
+            );
+            if (code != 0) std.os.windows.kernel32.ExitProcess(code);
+        } else switch (try child.wait()) {
+            .Exited => |code| if (code != 0) std.process.exit(code),
             else => std.process.exit(0xff),
         }
     }

@@ -301,6 +301,17 @@ fn addTests(
         t.run.expectStdErrEqual("");
     }
 
+    {
+        // anyzig must forward zig's exit code (on windows it's a child process)
+        const t = test_factory.add(.{
+            .name = "test-exit-code",
+            .input_dir = .no_input,
+            .options = .nosetup,
+            .args = &.{ "0.14.0", "build-exe", "does-not-exist.zig" },
+        });
+        t.run.expectExitCode(1);
+    }
+
     _ = test_factory.add(.{
         .name = "test-master-version",
         .input_dir = .no_input,
