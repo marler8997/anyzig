@@ -106,12 +106,10 @@ pub fn build(b: *std.Build) !void {
         .optimize = .Debug,
     });
 
-    const ci_step = b.step("ci", "The build/test step to run on the CI");
-    ci_step.dependOn(b.getInstallStep());
-    ci_step.dependOn(test_step);
-    ci_step.dependOn(&install_version_release_file.step);
+    const release_step = b.step("release", "Build/archive release executables for all targets and test the native one");
+    release_step.dependOn(&install_version_release_file.step);
 
-    try ci(b, &release_version, release_version_embed, zig_mod, ci_step, host_zip_exe);
+    try addReleaseSteps(b, &release_version, release_version_embed, zig_mod, release_step, host_zip_exe);
 }
 
 fn verifyForceVersion(v: []const u8) [11]u8 {
@@ -167,7 +165,6 @@ fn setBuildOptions(b: *std.Build, exe: *std.Build.Step.Compile, exe_kind: Exe) v
 
 const SharedTestOptions = struct {
     make_build_steps: bool,
-    failing_to_execute_foreign_is_an_error: bool = true,
 };
 fn addTests(
     b: *std.Build,
@@ -614,15 +611,15 @@ const ZigRelease = enum {
     }
 };
 
-fn ci(
+fn addReleaseSteps(
     b: *std.Build,
     release_version: []const u8,
     release_version_embed: *std.Build.Module,
     zig_mod: *std.Build.Module,
-    ci_step: *std.Build.Step,
+    release_step: *std.Build.Step,
     host_zip_exe: *std.Build.Step.Compile,
 ) !void {
-    const ci_targets = [_][]const u8{
+    const release_targets = [_][]const u8{
         "aarch64-linux",
         "aarch64-macos",
         "aarch64-windows",
@@ -637,19 +634,28 @@ fn ci(
         "x86_64-windows",
     };
 
-    const make_archive_step = b.step("archive", "Create CI archives");
-    ci_step.dependOn(make_archive_step);
+    const make_archive_step = b.step("archive", "Create release archives");
+    const host_supported = builtin.os.tag == .linux and builtin.cpu.arch == .x86_64;
+    if (host_supported) {
+        release_step.dependOn(make_archive_step);
+    } else {
+        const fail = b.addFail(b.fmt(
+            "releases can only be made on x86_64-linux but this host is {s}-{s}",
+            .{ @tagName(builtin.cpu.arch), @tagName(builtin.os.tag) },
+        ));
+        release_step.dependOn(&fail.step);
+        make_archive_step.dependOn(&fail.step);
+    }
 
-    for (ci_targets) |ci_target_str| {
+    for (release_targets) |release_target_str| {
         const target = b.resolveTargetQuery(try std.Target.Query.parse(
-            .{ .arch_os_abi = ci_target_str },
+            .{ .arch_os_abi = release_target_str },
         ));
         const optimize: std.builtin.OptimizeMode = .ReleaseSafe;
 
-        const target_dest_dir: std.Build.InstallDir = .{ .custom = ci_target_str };
+        const target_dest_dir: std.Build.InstallDir = .{ .custom = release_target_str };
 
-        const install_exes = b.step(b.fmt("install-{s}", .{ci_target_str}), "");
-        ci_step.dependOn(install_exes);
+        const install_exes = b.step(b.fmt("install-{s}", .{release_target_str}), "");
         const zig_exe = b.addExecutable(.{
             .name = "zig",
             .root_module = b.createModule(.{
@@ -685,23 +691,22 @@ fn ci(
             &b.addInstallArtifact(zls_exe, .{ .dest_dir = .{ .override = target_dest_dir } }).step,
         );
 
-        const target_test_step = b.step(b.fmt("test-{s}", .{ci_target_str}), "");
+        const target_test_step = b.step(b.fmt("test-{s}", .{release_target_str}), "");
         addTests(b, release_version, zig_exe, target_test_step, .{
             .make_build_steps = false,
-            // This doesn't seem to be working, so we're only adding these tests
-            // as a dependency if we see the arch is compatible beforehand
-            .failing_to_execute_foreign_is_an_error = false,
         });
-        const os_compatible = (builtin.os.tag == target.result.os.tag);
-        const arch_compatible = (builtin.cpu.arch == target.result.cpu.arch);
-        if (os_compatible and arch_compatible) {
-            ci_step.dependOn(target_test_step);
-        }
 
-        if (builtin.os.tag == .linux and builtin.cpu.arch == .x86_64) {
-            make_archive_step.dependOn(makeCiArchiveStep(
+        if (host_supported) {
+            release_step.dependOn(install_exes);
+            // only the native target's tests can be run
+            const os_compatible = (builtin.os.tag == target.result.os.tag);
+            const arch_compatible = (builtin.cpu.arch == target.result.cpu.arch);
+            if (os_compatible and arch_compatible) {
+                release_step.dependOn(target_test_step);
+            }
+            make_archive_step.dependOn(makeReleaseArchiveStep(
                 b,
-                ci_target_str,
+                release_target_str,
                 target.result,
                 target_dest_dir,
                 install_exes,
@@ -711,9 +716,9 @@ fn ci(
     }
 }
 
-fn makeCiArchiveStep(
+fn makeReleaseArchiveStep(
     b: *std.Build,
-    ci_target_str: []const u8,
+    release_target_str: []const u8,
     target: std.Target,
     target_install_dir: std.Build.InstallDir,
     install_exes: *std.Build.Step,
@@ -727,7 +732,7 @@ fn makeCiArchiveStep(
     if (target.os.tag == .windows) {
         const out_zip_file = b.pathJoin(&.{
             install_path,
-            b.fmt("anyzig-{s}.zip", .{ci_target_str}),
+            b.fmt("anyzig-{s}.zip", .{release_target_str}),
         });
         const zip = b.addRunArtifact(host_zip_exe);
         zip.addArg(out_zip_file);
@@ -747,7 +752,7 @@ fn makeCiArchiveStep(
 
     const targz = b.pathJoin(&.{
         install_path,
-        b.fmt("anyzig-{s}.tar.gz", .{ci_target_str}),
+        b.fmt("anyzig-{s}.tar.gz", .{release_target_str}),
     });
     const tar = b.addSystemCommand(&.{
         "tar",
