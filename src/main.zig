@@ -24,8 +24,8 @@ const introspect = zig.introspect;
 pub const log = std.log;
 
 const hashstore = @import("hashstore.zig");
-const LockFile = @import("LockFile.zig");
 const Cmdline = @import("Cmdline.zig");
+const TmpFile = @import("TmpFile.zig");
 
 pub const std_options: std.Options = .{
     .logFn = anyzigLog,
@@ -386,7 +386,7 @@ pub fn main() !void {
             const download_index_kind: DownloadIndexKind = .official;
             const index_path = try std.fs.path.join(arena, &.{ app_data_path, download_index_kind.basename() });
             defer arena.free(index_path);
-            try fetchFile(arena, download_index_kind.url(), download_index_kind.uri(), index_path);
+            try fetchFile(arena, app_data_path, download_index_kind.url(), download_index_kind.uri(), index_path);
             const index_content = blk: {
                 // since we just downloaded the file, this should always succeed now
                 const file = try std.fs.cwd().openFile(index_path, .{});
@@ -402,13 +402,17 @@ pub fn main() !void {
     }
 
     const hashstore_path = try std.fs.path.join(arena, &.{ app_data_path, "hashstore" });
+    const tmp_path = try std.fs.path.join(arena, &.{ app_data_path, "tmp" });
     // no need to free
     try hashstore.init(hashstore_path);
 
     const hashstore_name = std.fmt.allocPrint(arena, exe_str ++ "-{}", .{semantic_version}) catch |e| oom(e);
     // no need to free
 
-    const maybe_hash = maybeHashAndPath(try hashstore.find(hashstore_path, hashstore_name));
+    const maybe_hash = maybeHashAndPath(switch (try hashstore.find(hashstore_path, hashstore_name)) {
+        .not_found, .invalid => null,
+        .found => |hash| hash,
+    });
 
     const override_global_cache_dir: ?[]const u8 = try EnvVar.ZIG_GLOBAL_CACHE_DIR.get(arena);
     var global_cache_directory: Directory = l: {
@@ -452,11 +456,10 @@ pub fn main() !void {
                     "{s} hash has changed!\nold:{s}\nnew:{s}\n",
                     .{ hashstore_name, previous_hash.val.toSlice(), hash.val.toSlice() },
                 );
-                try hashstore.delete(hashstore_path, hashstore_name);
-                try hashstore.save(hashstore_path, hashstore_name, hash.val.toSlice());
+                try hashstore.save(tmp_path, hashstore_path, hashstore_name, hash.val.toSlice());
             }
         } else {
-            try hashstore.save(hashstore_path, hashstore_name, hash.val.toSlice());
+            try hashstore.save(tmp_path, hashstore_path, hashstore_name, hash.val.toSlice());
         }
         break :blk hash;
     };
@@ -605,6 +608,7 @@ fn listInstalled() !void {
     const app_data_dir = try global.getAppDataDir();
 
     const hashstore_path = try std.fs.path.join(global.arena, &.{ app_data_dir, "hashstore" });
+    const tmp_path = try std.fs.path.join(global.arena, &.{ app_data_dir, "tmp" });
     // no need to free
     try hashstore.init(hashstore_path);
     const reverse_lookup = try hashstore.allocReverseLookup(hashstore_path, global.arena);
@@ -661,7 +665,10 @@ fn listInstalled() !void {
         const semantic_version = SemanticVersion.parse(version_str) orelse continue;
         const hashstore_name = std.fmt.allocPrint(global.arena, exe_str ++ "-{}", .{semantic_version}) catch |e| oom(e);
         defer global.arena.free(hashstore_name);
-        const maybe_hash = maybeHashAndPath(try hashstore.find(hashstore_path, hashstore_name));
+        const maybe_hash = maybeHashAndPath(switch (try hashstore.find(hashstore_path, hashstore_name)) {
+            .not_found, .invalid => null,
+            .found => |hash| hash,
+        });
         if (maybe_hash) |*anyzig_store_hash| {
             if (!anyzig_store_hash.val.eql(&hash_from_cache)) {
                 log.err(
@@ -675,7 +682,7 @@ fn listInstalled() !void {
         } else {
             // TODO: should we just trust the hash is good?
             log.info("new hash added to anyzig store: {s}", .{entry.name});
-            try hashstore.save(hashstore_path, hashstore_name, entry.name);
+            try hashstore.save(tmp_path, hashstore_path, hashstore_name, entry.name);
         }
         try listVersion(p_path, semantic_version, entry.name);
     }
@@ -910,7 +917,7 @@ fn getVersionUrl(
             return url;
     }
 
-    try fetchFile(arena, download_index_kind.url(), download_index_kind.uri(), index_path);
+    try fetchFile(arena, app_data_path, download_index_kind.url(), download_index_kind.uri(), index_path);
     const index_content = blk: {
         // since we just downloaded the file, this should always succeed now
         const file = try std.fs.cwd().openFile(index_path, .{});
@@ -1007,6 +1014,7 @@ fn hashAndPath(hash: zig.Package.Hash) HashAndPath {
 
 fn fetchFile(
     scratch: Allocator,
+    app_data_path: []const u8,
     url_string: []const u8,
     uri: std.Uri,
     out_filepath: []const u8,
@@ -1018,13 +1026,6 @@ fn fetchFile(
     defer scratch.free(progress_node_name);
     const node = root.start(progress_node_name, 1);
     defer node.end();
-
-    const lock_filepath = try std.mem.concat(scratch, u8, &.{ out_filepath, ".lock" });
-    defer scratch.free(lock_filepath);
-
-    // TODO: might be nice for the lock file to report progress as well?
-    var file_lock = try LockFile.lock(lock_filepath);
-    defer file_lock.unlock();
 
     var client = std.http.Client{ .allocator = scratch };
     defer client.deinit();
@@ -1054,22 +1055,13 @@ fn fetchFile(
         .{ uri, @intFromEnum(request.response.status), request.response.status.phrase() },
     );
 
-    const out_filepath_tmp = std.mem.concat(scratch, u8, &.{ out_filepath, ".fetching" }) catch |e| oom(e);
-    defer scratch.free(out_filepath_tmp);
-
-    const file = std.fs.cwd().createFile(out_filepath_tmp, .{}) catch |e| std.debug.panic(
-        "create '{s}' failed with {s}",
-        .{ out_filepath_tmp, @errorName(e) },
-    );
-    defer {
-        if (std.fs.cwd().deleteFile(out_filepath_tmp)) {
-            std.log.info("removed '{s}'", .{out_filepath_tmp});
-        } else |err| switch (err) {
-            error.FileNotFound => {},
-            else => |e| std.log.err("remove '{s}' failed with {s}", .{ out_filepath_tmp, @errorName(e) }),
-        }
-        file.close();
-    }
+    // Each process downloads to its own temporary file which is then atomically renamed
+    // over out_filepath (see TmpFile). If multiple processes fetch at the same time they
+    // each download the file and the last rename wins.
+    const tmp_path = std.fs.path.join(scratch, &.{ app_data_path, "tmp" }) catch |e| oom(e);
+    defer scratch.free(tmp_path);
+    var tmp_file = try TmpFile.create(tmp_path);
+    defer tmp_file.deinit();
 
     const maybe_content_length: ?u64 = blk: {
         // content length doesn't seem to be working with the mach index?
@@ -1084,7 +1076,7 @@ fn fetchFile(
     };
 
     if (maybe_content_length) |content_length| {
-        try file.setEndPos(content_length);
+        try tmp_file.file.setEndPos(content_length);
     }
 
     var total_received: u64 = 0;
@@ -1105,7 +1097,7 @@ fn fetchFile(
         }
         // NOTE: not going through a buffered writer since we're writing
         //       large chunks
-        file.writer().writeAll(buf[0..len]) catch |err| std.debug.panic(
+        tmp_file.file.writer().writeAll(buf[0..len]) catch |err| std.debug.panic(
             "fetch '{}': write {} bytes of HTTP response failed with {s}",
             .{ uri, len, @errorName(err) },
         );
@@ -1118,7 +1110,7 @@ fn fetchFile(
         );
     }
 
-    try std.fs.cwd().rename(out_filepath_tmp, out_filepath);
+    try tmp_file.finish(out_filepath);
 }
 
 pub fn cmdFetch(
