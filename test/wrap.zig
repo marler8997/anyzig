@@ -7,16 +7,46 @@ pub fn main() !u8 {
     const arena = arena_instance.allocator();
     const all_args = try std.process.argsAlloc(arena);
 
+    // usage: wrap INPUT_DIR OUTPUT_DIR [SETUP_OPTIONS...] -- EXE ARGS...
     const input_dir = all_args[1];
     const output_dir = all_args[2];
-    const options = all_args[3];
-    const exe_index = 4;
 
-    if (std.mem.eql(u8, options, "nosetup")) {} else if (std.mem.eql(u8, options, "badhash")) {
-        @panic("todo");
-    } else {
-        std.debug.panic("todo: support setup options '{s}'", .{options});
-    }
+    var isolate_appdata = false;
+    var corrupt_entry: ?struct { content: []const u8, name: []const u8 } = null;
+    var old_lock_file: ?[]const u8 = null;
+    var global_cache_dir: ?[]const u8 = null;
+    var offline = false;
+    const exe_index = blk: {
+        var i: usize = 3;
+        while (i < all_args.len) : (i += 1) {
+            const arg = all_args[i];
+            if (std.mem.eql(u8, arg, "--")) break :blk i + 1;
+            if (std.mem.eql(u8, arg, "--badhash")) {
+                @panic("todo");
+            } else if (std.mem.eql(u8, arg, "--appdata")) {
+                isolate_appdata = true;
+            } else if (std.mem.startsWith(u8, arg, "--corrupt-entry=")) {
+                var it = std.mem.splitScalar(u8, arg["--corrupt-entry=".len..], ':');
+                const content = it.next().?;
+                corrupt_entry = .{ .content = content, .name = it.rest() };
+            } else if (std.mem.startsWith(u8, arg, "--old-lock-file=")) {
+                old_lock_file = arg["--old-lock-file=".len..];
+            } else if (std.mem.startsWith(u8, arg, "--global-cache-dir=")) {
+                global_cache_dir = arg["--global-cache-dir=".len..];
+            } else if (std.mem.eql(u8, arg, "--offline")) {
+                offline = true;
+            } else std.debug.panic("unknown setup option '{s}'", .{arg});
+        }
+        std.debug.panic("missing '--' before the exe", .{});
+    };
+    if ((corrupt_entry != null or old_lock_file != null) and !isolate_appdata) std.debug.panic(
+        "--corrupt-entry and --old-lock-file require --appdata (we never modify the real appdata)",
+        .{},
+    );
+    const hashstore_path = switch (builtin.os.tag) {
+        .macos => "appdata/Library/Application Support/anyzig/hashstore",
+        else => "appdata/anyzig/hashstore",
+    };
 
     try std.fs.cwd().deleteTree(output_dir);
     try std.fs.cwd().makeDir(output_dir);
@@ -28,8 +58,50 @@ pub fn main() !u8 {
     }
 
     try std.posix.chdirZ(output_dir);
+
+    var env = try std.process.getEnvMap(arena);
+    if (global_cache_dir) |dir| try env.put("ZIG_GLOBAL_CACHE_DIR", dir);
+    if (offline) {
+        // point the http proxies at a dead port so any attempt to use the network fails
+        for ([_][]const u8{ "http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY", "all_proxy", "ALL_PROXY" }) |name| {
+            try env.put(name, "http://127.0.0.1:1");
+        }
+    }
+    if (isolate_appdata) {
+        const appdata_root = try std.fs.path.join(arena, &.{ try std.process.getCwdAlloc(arena), "appdata" });
+        try env.put(switch (builtin.os.tag) {
+            .windows => "LOCALAPPDATA",
+            .macos => "HOME",
+            else => "XDG_DATA_HOME",
+        }, appdata_root);
+    }
+    if (old_lock_file) |name| {
+        // simulates a lock file left behind by an older version of anyzig
+        var hashstore = try std.fs.cwd().openDir(hashstore_path, .{});
+        defer hashstore.close();
+        try hashstore.writeFile(.{ .sub_path = name, .data = "" });
+    }
+    if (corrupt_entry) |entry| {
+        var hashstore = try std.fs.cwd().openDir(hashstore_path, .{});
+        defer hashstore.close();
+        // the entry must already exist (i.e. from a previous test), otherwise we
+        // wouldn't be testing a corrupt entry
+        hashstore.access(entry.name, .{}) catch |err| std.debug.panic(
+            "hashstore entry '{s}/{s}' to corrupt doesn't exist ({s})",
+            .{ hashstore_path, entry.name, @errorName(err) },
+        );
+        const content: []const u8 = if (std.mem.eql(u8, entry.content, "empty"))
+            ""
+        else if (std.mem.eql(u8, entry.content, "too_big"))
+            &([1]u8{'a'} ** 4096)
+        else
+            std.debug.panic("unknown corrupt entry content '{s}'", .{entry.content});
+        try hashstore.writeFile(.{ .sub_path = entry.name, .data = content });
+    }
+
     if (builtin.os.tag == .windows) {
         var child: std.process.Child = .init(all_args[exe_index..], arena);
+        child.env_map = &env;
         try child.spawn();
         const result = try child.wait();
         switch (result) {
@@ -41,10 +113,11 @@ pub fn main() !u8 {
         }
     } else {
         const exe = std.os.argv[exe_index];
+        const envp = try std.process.createEnvironFromMap(arena, &env, .{});
         const err = std.posix.execveZ(
             exe,
             @ptrCast(std.os.argv.ptr + exe_index),
-            @ptrCast(std.os.environ.ptr),
+            envp,
         );
         std.log.err("exec '{s}' failed with {s}", .{ exe, @errorName(err) });
         return 0xff;

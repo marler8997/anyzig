@@ -96,6 +96,14 @@ pub fn build(b: *std.Build) !void {
 
     const test_step = b.step("test", "");
     addTests(b, dev_version, anyzig, test_step, .{ .make_build_steps = true });
+    {
+        const unit_tests = b.addRunArtifact(b.addTest(.{
+            .root_source_file = b.path("src/TmpFile.zig"),
+            .target = b.graph.host,
+        }));
+        b.step("unit-test", "Run the unit tests").dependOn(&unit_tests.step);
+        test_step.dependOn(&unit_tests.step);
+    }
 
     const zip_dep = b.dependency("zip", .{});
 
@@ -420,6 +428,85 @@ fn addTests(
         }
     }
 
+    // Cache tests. A cache is meant to be unobservable, a cache hit and a cache miss produce
+    // the same output, and anyzig recovers from invalid hashstore entries by re-fetching.
+    // So if the cache broke, every other test would still pass, anyzig would just silently
+    // fall back to downloading on every run. These tests make the cache observable by
+    // running "warm" invocations offline, which can only succeed if the cache is used.
+    // Each test runs on the appdata state left by the previous one.
+    {
+        const write_files = b.addWriteFiles();
+        _ = write_files.add("build.zig", "");
+        _ = write_files.add("build.zig.zon", ".{ .minimum_zig_version = \"0.14.0\" }\n");
+        const cold = test_factory.add(.{
+            .name = "test-cache-cold",
+            .input_dir = .{ .path = write_files.getDirectory() },
+            .options = .{ .appdata = .{} },
+            .args = &.{"version"},
+        });
+        cold.run.expectStdOutEqual("0.14.0\n");
+        cold.run.addCheck(.{ .expect_stderr_match = "downloaded zig-0.14.0" });
+
+        const warm = test_factory.add(.{
+            .name = "test-cache-warm",
+            .input_dir = .{ .path = cold.output_dir },
+            .options = .{ .appdata = .{} },
+            .offline = true,
+            .args = &.{"version"},
+        });
+        warm.run.expectStdOutEqual("0.14.0\n");
+        warm.run.addCheck(.{ .expect_stderr_match = "already exists" });
+
+        // an invalid entry warns, re-fetches and saves the entry again
+        const recover_empty = test_factory.add(.{
+            .name = "test-cache-recover-empty",
+            .input_dir = .{ .path = warm.output_dir },
+            .options = .{ .appdata = .{ .corrupt_entry = .{ .name = "zig-0.14.0", .content = .empty } } },
+            .args = &.{"version"},
+        });
+        recover_empty.run.expectStdOutEqual("0.14.0\n");
+        recover_empty.run.addCheck(.{ .expect_stderr_match = "is invalid (empty)" });
+        recover_empty.run.addCheck(.{ .expect_stderr_match = "downloaded zig-0.14.0" });
+
+        const warm_after_empty = test_factory.add(.{
+            .name = "test-cache-warm-after-recover-empty",
+            .input_dir = .{ .path = recover_empty.output_dir },
+            .options = .{ .appdata = .{} },
+            .offline = true,
+            .args = &.{"version"},
+        });
+        warm_after_empty.run.expectStdOutEqual("0.14.0\n");
+        warm_after_empty.run.addCheck(.{ .expect_stderr_match = "already exists" });
+
+        // list-installed restores invalid entries from the global cache, no network needed
+        const recover_too_big = test_factory.add(.{
+            .name = "test-cache-recover-too-big",
+            .input_dir = .{ .path = warm_after_empty.output_dir },
+            .options = .{
+                .appdata = .{
+                    .corrupt_entry = .{ .name = "zig-0.14.0", .content = .too_big },
+                    // without cleaning this up, list-installed panics on the invalid version
+                    .old_lock_file = "zig-0.14.0.lock",
+                },
+            },
+            .offline = true,
+            .args = &.{ "any", "list-installed" },
+        });
+        recover_too_big.run.addCheck(.{ .expect_stderr_match = "is invalid (too big" });
+        recover_too_big.run.addCheck(.{ .expect_stderr_match = "new hash added to anyzig store" });
+        recover_too_big.run.addCheck(.{ .expect_stderr_match = "left by an older version of anyzig" });
+
+        const warm_after_too_big = test_factory.add(.{
+            .name = "test-cache-warm-after-recover-too-big",
+            .input_dir = .{ .path = recover_too_big.output_dir },
+            .options = .{ .appdata = .{} },
+            .offline = true,
+            .args = &.{"version"},
+        });
+        warm_after_too_big.run.expectStdOutEqual("0.14.0\n");
+        warm_after_too_big.run.addCheck(.{ .expect_stderr_match = "already exists" });
+    }
+
     // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
     // TODO: finish this test
     if (false) {
@@ -559,7 +646,22 @@ const TestFactory = struct {
             no_input,
             path: std.Build.LazyPath,
         },
-        options: enum { nosetup, badhash },
+        options: union(enum) {
+            nosetup,
+            badhash,
+            /// Isolates the anyzig appdata directory in the output directory. Since the
+            /// input directory is copied to the output directory, appdata state carries
+            /// over to tests that use this test's output directory as their input.
+            appdata: struct {
+                /// overwrite a hashstore entry with invalid content before running
+                corrupt_entry: ?struct { name: []const u8, content: enum { empty, too_big } } = null,
+                /// create a lock file like the ones older versions of anyzig left behind
+                old_lock_file: ?[]const u8 = null,
+            },
+        },
+        /// Points the http proxies at a dead port so any attempt to use the network
+        /// fails, i.e. to verify anyzig is using its cache.
+        offline: bool = false,
         args: []const []const u8,
     }) TestAnyzig {
         const b = self.b;
@@ -570,7 +672,27 @@ const TestFactory = struct {
             .path => |p| run.addDirectoryArg(p),
         }
         const output_dir = run.addOutputDirectoryArg("out");
-        run.addArg(@tagName(args.options));
+        // Everything that affects the environment anyzig runs in is passed to wrap as an
+        // argument (and wrap sets the environment) rather than set on the run step with
+        // setEnvironmentVariable, because the run step's cache key includes its arguments
+        // but not its environment variables.
+        switch (args.options) {
+            .nosetup => {},
+            .badhash => run.addArg("--badhash"),
+            .appdata => |appdata| {
+                run.addArg("--appdata");
+                if (appdata.corrupt_entry) |entry| run.addArg(b.fmt(
+                    "--corrupt-entry={s}:{s}",
+                    .{ @tagName(entry.content), entry.name },
+                ));
+                if (appdata.old_lock_file) |name| run.addArg(b.fmt("--old-lock-file={s}", .{name}));
+                // on macos the appdata directory is derived from HOME, which would also
+                // move the global cache, so we always set the global cache explicitly
+                run.addArg(b.fmt("--global-cache-dir={s}", .{b.graph.global_cache_root.path orelse "."}));
+            },
+        }
+        if (args.offline) run.addArg("--offline");
+        run.addArg("--");
         run.addArtifactArg(self.anyzig);
         for (args.args) |a| {
             run.addArg(a);
