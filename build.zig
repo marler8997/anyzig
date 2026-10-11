@@ -292,15 +292,13 @@ fn addTests(
     }
 
     {
-        // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-        // TODO: override the appdata directory to run this test
-        // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-        _ = test_factory.add(.{
+        const t = test_factory.add(.{
             .name = "test-any-set-verbosity-warn",
             .input_dir = .no_input,
-            .options = .nosetup,
+            .options = .{ .appdata = .{} },
             .args = &.{ "any", "set-verbosity", "warn" },
         });
+        t.run.expectStdErrEqual("");
     }
 
     _ = test_factory.add(.{

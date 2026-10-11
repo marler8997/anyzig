@@ -584,12 +584,14 @@ fn anyCommand(cmdline: Cmdline, cmdline_offset: usize) !u8 {
                 &.{ app_data_dir, "verbosity" },
             ) catch |e| oom(e);
             defer global.arena.free(verbosity_path);
-            if (std.fs.path.dirname(verbosity_path)) |dir| {
-                try std.fs.cwd().makePath(dir);
-            }
-            const file = try std.fs.cwd().createFile(verbosity_path, .{});
-            defer file.close();
-            try file.writer().print("{s}\n", .{level_str});
+            const tmp_path = std.fs.path.join(global.arena, &.{ app_data_dir, "tmp" }) catch |e| oom(e);
+            defer global.arena.free(tmp_path);
+            // every anyzig process reads this file, so replace it atomically, otherwise a
+            // process could read it after it's been truncated but before it's written
+            var tmp_file = try TmpFile.create(tmp_path);
+            defer tmp_file.deinit();
+            try tmp_file.file.writer().print("{s}\n", .{level_str});
+            try tmp_file.finish(verbosity_path);
         }
         switch (readVerbosityFile()) {
             .no_app_data_dir => @panic("no app data dir?"),
