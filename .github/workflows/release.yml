@@ -4,14 +4,14 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: mlugg/setup-zig@v2
       - run: |
           zig build release --summary all
       - name: getversion
         id: version
         run: echo "version=$(cat zig-out/version-release)" >> $GITHUB_OUTPUT
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: anyzig-${{ steps.version.outputs.version }}-archives
           path: |
