@@ -4,7 +4,7 @@
 
 A universal zig executable that lets you run any version of zig. Since you can only have one `zig` executable in your `PATH`, anyzig removes the limitation that this can only be one version. The version of zig to invoke is pulled from the `minimum_zig_version` field of `build.zig.zon`. `build.zig.zon` is found by searching the current or any parent directory.
 
-Anytime a new zig version is needed, anyzig will invoke the equivalent of `zig fetch ZIG_DOWNLOAD_URL` to download it into the global cache.
+Anytime a new zig version is needed, anyzig will invoke the equivalent of `zig fetch ZIG_DOWNLOAD_URL` to download it into its own data directory (see [Where Compilers Are Installed](#where-compilers-are-installed)).
 
 In addition, you can also specify the version of zig to invoke by including it as the first argument, i.e.
 
@@ -20,6 +20,20 @@ Anyzig also adds a few of its own commands, which can be queried and invoked wit
 Go to https://marler8997.github.io/anyzig and select your OS/Arch to get a download link and/or instructions to install via the command-line.
 
 Otherwise, you can manually find and download/extract the applicable archive from Releases. It will contain a single static binary named `zig`, unless you're on Windows in which case it's 2 files, `zig.exe` and `zig.pdb`.
+
+# Where Compilers Are Installed
+
+Each version is installed to `APPDATA/zig/VERSION`, where `APPDATA` is:
+
+| OS | APPDATA |
+|---|---|
+| Linux (and other POSIX) | `$XDG_DATA_HOME/anyzig`, or `~/.local/share/anyzig` if that isn't set |
+| macOS | `~/Library/Application Support/anyzig` |
+| Windows | `%LOCALAPPDATA%\anyzig` |
+
+`zig any list-installed` lists the installed versions and where they are. A version only appears once it's fully installed, so it's safe to run multiple instances of anyzig at once. When several need the same new version, the first one installs it and the others wait for it.
+
+Older versions of anyzig installed compilers into zig's global cache (i.e. `~/.cache/zig/p/HASH`). When anyzig needs a version that one of those older versions installed, it copies it from there instead of downloading it again. It never modifies or deletes the old copy, since it lives in zig's cache.
 
 # Mach Versions and Download Mirror
 

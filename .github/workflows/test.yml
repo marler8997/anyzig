@@ -7,19 +7,22 @@ jobs:
         include:
           - os: windows-latest
           - os: windows-11-arm
-          - os: macos-15 # TODO: change back to macos-latest once we upgrade to zig 0.17.0
+          - os: macos-15
+            xcode: "16.4"
+          - os: macos-latest
+            build_args: -Datleast-xcode26_4
           - os: ubuntu-latest
       fail-fast: false
     runs-on: ${{matrix.os}}
     steps:
       - uses: actions/checkout@v7
-      - if: ${{ startsWith(matrix.os, 'macos') }}
+      - if: ${{ matrix.xcode }}
         name: select xcode
-        # zig 0.14.0 can't link against the newer Xcode SDKs (undefined libSystem symbols)
+        # the tests build with old zig versions (0.11 to 0.14) which can't link against the newer Xcode SDKs (undefined libSystem symbols)
         run: |
           ls -d /Applications/Xcode*
-          sudo xcode-select -s /Applications/Xcode_16.4.app
+          sudo xcode-select -s /Applications/Xcode_${{ matrix.xcode }}.app
           xcrun --show-sdk-path
       - uses: mlugg/setup-zig@v2
       - run: |
-          zig build install test --summary all
+          zig build install test --summary all ${{ matrix.build_args }}

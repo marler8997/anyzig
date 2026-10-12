@@ -1,0 +1,22 @@
+diff --git a/Maker/Fetch.zig b/Maker/Fetch.zig
+--- a/Maker/Fetch.zig
++++ b/Maker/Fetch.zig
+@@ -152,6 +152,9 @@ pub const JobQueue = struct {
+     /// If this is true, `recursive` must be false.
+     debug_hash: bool,
+     mode: Mode,
++    /// Don't recompress fetched packages into the global cache, for tools that keep the
++    /// unpacked packages themselves.
++    disable_recompress: bool = false,
+     /// Set of hashes that will be additionally fetched even if they are marked
+     /// as lazy.
+     unlazy_set: UnlazySet = .{},
+@@ -793,7 +796,7 @@ fn runResource(
+     }
+     f.remote_package_root = f.package_root;
+ 
+-    if (!disable_recompress) {
++    if (!disable_recompress and !job_queue.disable_recompress) {
+         // Spin off a task to recompress the tarball, with filtered files deleted, into
+         // the global cache.
+         job_queue.group.async(io, JobQueue.recompress, .{ job_queue, computed_package_hash, f.package_root });

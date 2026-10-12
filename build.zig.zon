@@ -2,15 +2,19 @@
     .name = .anyzig,
     .version = "0.0.0",
     .fingerprint = 0x7cd092f5bd0fed33, // Changing this has security and trust implications.
-    .minimum_zig_version = "0.14.0",
+    .minimum_zig_version = "0.17.0",
     .dependencies = .{
         .zig = .{
-            .url = "git+https://github.com/ziglang/zig#5ad91a646a753cc3eecd8751e61cf458dadd9ac4",
-            .hash = "zig-0.0.0-Fp4XJDTgLgvQHn6QVvTe6INRdgdAzu43qE4JBXxhn9Ln",
+            .url = "git+https://github.com/ziglang/zig#7647adab80dd088f4de3610fd245915a912eb6ad",
+            .hash = "zig-0.0.0-Fp4XJNPbSg7JHi19U9bkBViqpw1CEGENf1JhYBLHWjMq",
         },
         .zip = .{
-            .url = "git+https://github.com/marler8997/zipcmdline#3dfca786a489d117e4b72ea10ffb4bbd9fc2dd72",
-            .hash = "12201a08d7eff7619c8eb8284691a3ff959861b4bdd87216f180ed136672fb4ea26f",
+            .url = "git+https://github.com/marler8997/zipcmdline#90289282eb4fa0b984e6d99cea9695e02fb043c2",
+            .hash = "zipcmdline-0.0.0-DFii0-7PAACK7_UJ8gasN6DXAmgD5WABH2x6DNaljPQc",
+        },
+        .patch = .{
+            .url = "git+https://github.com/marler8997/zig-patch#c3ad78b305ba03bcd645c0bac004d1719407c6b8",
+            .hash = "patch-0.0.0-WCKjsxixAADfwXQv4Vugyxo6PFbDFuuyM7ly3OiqZRYR",
         },
     },
     .paths = .{

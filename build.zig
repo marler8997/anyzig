@@ -5,14 +5,15 @@ const zig = @import("zig");
 const Exe = enum { zig, zls };
 
 pub fn build(b: *std.Build) !void {
-    const zig_dep = b.dependency("zig", .{});
+    // zig's build script gets the version from git, which the fetched package doesn't have
+    const zig_dep = b.dependency("zig", .{ .@"version-string" = "0.17.0" });
 
     const version_option: ?[11]u8 = if (b.option(
         []const u8,
         "force-version",
         "Force a specific version, bypassing the automatic calendar version.",
     )) |v| verifyForceVersion(v) else null;
-    const release_version = if (version_option) |v| v else try makeCalVersion();
+    const release_version = if (version_option) |v| v else try makeCalVersion(b.graph.io);
     const dev_version = b.fmt("{s}-dev", .{if (version_option) |v| v else release_version});
     const write_files_version = b.addWriteFiles();
     const release_version_file = write_files_version.add("version-release", &release_version);
@@ -24,9 +25,14 @@ pub fn build(b: *std.Build) !void {
     });
     const install_version_release_file = b.addInstallFile(release_version_file, "version-release");
 
+    // Fetch lives in zig's build runner (lib/compiler), not a module, so we patch a copy and add a root file
+    const patched_compiler = b.dependency("patch", .{
+        .source = zig_dep.path("lib/compiler"),
+        .patches = &[_]std.Build.LazyPath{b.path("zigroot/fetch.patch")},
+    }).namedLazyPath("patched");
     const write = b.addWriteFiles();
-    _ = write.addCopyDirectory(zig_dep.path("."), "", .{});
-    const root = write.addCopyFile(b.path("zigroot/root.zig"), "src/root.zig");
+    _ = write.addCopyDirectory(patched_compiler, "", .{});
+    const root = write.addCopyFile(b.path("zigroot/root.zig"), "root.zig");
     const zig_mod = b.createModule(.{
         .root_source_file = root,
     });
@@ -49,7 +55,7 @@ pub fn build(b: *std.Build) !void {
                     .{ .name = "zig", .module = zig_mod },
                     .{
                         .name = "version",
-                        .module = if (b.graph.env_map.get("HEW_BUILD_REVISION")) |r| b.createModule(.{
+                        .module = if (b.graph.environ_map.get("HEW_BUILD_REVISION")) |r| b.createModule(.{
                             .root_source_file = write_files_version.add("version-release-native", b.fmt("{s}-native", .{r})),
                         }) else dev_version_embed,
                     },
@@ -62,9 +68,7 @@ pub fn build(b: *std.Build) !void {
 
         const run = b.addRunArtifact(exe);
         run.step.dependOn(&install.step);
-        if (b.args) |args| {
-            run.addArgs(args);
-        }
+        run.addPassthruArgs();
         b.step("run", "").dependOn(&run.step);
         break :blk exe;
     };
@@ -88,31 +92,42 @@ pub fn build(b: *std.Build) !void {
 
         const run = b.addRunArtifact(exe);
         run.step.dependOn(&install.step);
-        if (b.args) |args| {
-            run.addArgs(args);
-        }
+        run.addPassthruArgs();
         b.step("zls", "").dependOn(&run.step);
     }
 
+    const atleast_xcode26_4 = b.option(
+        bool,
+        "atleast-xcode26_4",
+        "The selected Xcode is 26.4 or newer, skips the tests that build with old zig versions (0.11 to 0.14 can't link against its SDK)",
+    ) orelse false;
+
     const test_step = b.step("test", "");
-    addTests(b, dev_version, anyzig, test_step, .{ .make_build_steps = true });
+    addTests(b, dev_version, anyzig, test_step, .{ .make_build_steps = true, .old_zig_builds = !atleast_xcode26_4 });
     {
-        const unit_tests = b.addRunArtifact(b.addTest(.{
-            .root_source_file = b.path("src/TmpFile.zig"),
-            .target = b.graph.host,
+        const unit_test_step = b.step("unit-test", "Run the unit tests");
+        test_step.dependOn(unit_test_step);
+        const tmp_file_tests = b.addRunArtifact(b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/TmpFile.zig"),
+                .target = b.graph.host,
+            }),
         }));
-        b.step("unit-test", "Run the unit tests").dependOn(&unit_tests.step);
-        test_step.dependOn(&unit_tests.step);
+        unit_test_step.dependOn(&tmp_file_tests.step);
+        const hashstore_tests = b.addRunArtifact(b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/hashstore.zig"),
+                .target = b.graph.host,
+                .imports = &.{.{ .name = "zig", .module = zig_mod }},
+            }),
+        }));
+        unit_test_step.dependOn(&hashstore_tests.step);
     }
 
-    const zip_dep = b.dependency("zip", .{});
-
-    const host_zip_exe = b.addExecutable(.{
-        .name = "zip",
-        .root_source_file = zip_dep.path("src/zip.zig"),
+    const host_zip_exe = b.dependency("zip", .{
         .target = b.graph.host,
-        .optimize = .Debug,
-    });
+        .optimize = .debug,
+    }).artifact("zip");
 
     const release_step = b.step("release", "Build/archive release executables for all targets and test the native one");
     release_step.dependOn(&install_version_release_file.step);
@@ -150,15 +165,15 @@ fn verifyForceVersion(v: []const u8) [11]u8 {
     return result;
 }
 
-fn makeCalVersion() ![11]u8 {
-    const now = std.time.epoch.EpochSeconds{ .secs = @intCast(std.time.timestamp()) };
+fn makeCalVersion(io: std.Io) ![11]u8 {
+    const now = std.time.epoch.EpochSeconds{ .secs = @intCast(std.Io.Clock.real.now(io).toSeconds()) };
     const day = now.getEpochDay();
     const year_day = day.calculateYearDay();
     const month_day = year_day.calculateMonthDay();
     var buf: [11]u8 = undefined;
     const formatted = try std.fmt.bufPrint(&buf, "v{d}_{d:0>2}_{d:0>2}", .{
         year_day.year,
-        @intFromEnum(month_day.month),
+        @backingInt(month_day.month),
         month_day.day_index,
     });
     std.debug.assert(formatted.len == buf.len);
@@ -173,6 +188,7 @@ fn setBuildOptions(b: *std.Build, exe: *std.Build.Step.Compile, exe_kind: Exe) v
 
 const SharedTestOptions = struct {
     make_build_steps: bool,
+    old_zig_builds: bool,
 };
 fn addTests(
     b: *std.Build,
@@ -186,6 +202,7 @@ fn addTests(
         run.setName(b.fmt("anyzig {s}", .{flag}));
         run.addArg(flag);
         run.addCheck(.{ .expect_stdout_match = "Usage: zig [command] [options]" });
+        run.expectExitCode(0);
         if (opt.make_build_steps) {
             b.step(b.fmt("test{s}", .{flag}), "").dependOn(&run.step);
         }
@@ -221,6 +238,7 @@ fn addTests(
         run.addCheck(.{
             .expect_stderr_match = "no build.zig to pull a zig version from, you can:",
         });
+        run.expectExitCode(0xff);
         test_step.dependOn(&run.step);
     }
 
@@ -230,8 +248,10 @@ fn addTests(
         .anyzig = anyzig,
         .wrap_exe = b.addExecutable(.{
             .name = "wrap",
-            .root_source_file = b.path("test/wrap.zig"),
-            .target = b.graph.host,
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("test/wrap.zig"),
+                .target = b.graph.host,
+            }),
         }),
         .make_build_steps = opt.make_build_steps,
     };
@@ -249,6 +269,7 @@ fn addTests(
         ) });
         t.run.addCheck(.{ .expect_stderr_match = "zig any version" });
         t.run.addCheck(.{ .expect_stderr_match = "zig any set-verbosity" });
+        t.run.expectExitCode(0xff);
     }
 
     {
@@ -325,9 +346,8 @@ fn addTests(
         .args = &.{ "master", "init" },
     });
 
-    inline for (std.meta.fields(ZigRelease)) |field| {
-        const zig_version = field.name;
-        const zig_release: ZigRelease = @enumFromInt(field.value);
+    inline for (comptime std.meta.tags(ZigRelease)) |zig_release| {
+        const zig_version = @tagName(zig_release);
 
         if (zig_release == .@"2024.11.0-mach") continue; // TODO: re-enable when pkg.hexops.org is back online
 
@@ -427,7 +447,7 @@ fn addTests(
         };
 
         // TODO: test more than just 'zig build'
-        if (build_enabled) {
+        if (build_enabled and opt.old_zig_builds) {
             _ = test_factory.add(.{
                 .name = b.fmt("test-{s}-build", .{zig_version}),
                 .input_dir = .{ .path = init_out },
@@ -437,12 +457,7 @@ fn addTests(
         }
     }
 
-    // Cache tests. A cache is meant to be unobservable, a cache hit and a cache miss produce
-    // the same output, and anyzig recovers from invalid hashstore entries by re-fetching.
-    // So if the cache broke, every other test would still pass, anyzig would just silently
-    // fall back to downloading on every run. These tests make the cache observable by
-    // running "warm" invocations offline, which can only succeed if the cache is used.
-    // Each test runs on the appdata state left by the previous one.
+    // offline runs can only succeed if the install is found, each test uses the previous one's appdata
     {
         const write_files = b.addWriteFiles();
         _ = write_files.add("build.zig", "");
@@ -466,54 +481,120 @@ fn addTests(
         warm.run.expectStdOutEqual("0.14.0\n");
         warm.run.addCheck(.{ .expect_stderr_match = "already exists" });
 
-        // an invalid entry warns, re-fetches and saves the entry again
-        const recover_empty = test_factory.add(.{
-            .name = "test-cache-recover-empty",
+        const list_installed = test_factory.add(.{
+            .name = "test-list-installed",
             .input_dir = .{ .path = warm.output_dir },
-            .options = .{ .appdata = .{ .corrupt_entry = .{ .name = "zig-0.14.0", .content = .empty } } },
-            .args = &.{"version"},
-        });
-        recover_empty.run.expectStdOutEqual("0.14.0\n");
-        recover_empty.run.addCheck(.{ .expect_stderr_match = "is invalid (empty)" });
-        recover_empty.run.addCheck(.{ .expect_stderr_match = "downloaded zig-0.14.0" });
-
-        const warm_after_empty = test_factory.add(.{
-            .name = "test-cache-warm-after-recover-empty",
-            .input_dir = .{ .path = recover_empty.output_dir },
             .options = .{ .appdata = .{} },
-            .offline = true,
-            .args = &.{"version"},
-        });
-        warm_after_empty.run.expectStdOutEqual("0.14.0\n");
-        warm_after_empty.run.addCheck(.{ .expect_stderr_match = "already exists" });
-
-        // list-installed restores invalid entries from the global cache, no network needed
-        const recover_too_big = test_factory.add(.{
-            .name = "test-cache-recover-too-big",
-            .input_dir = .{ .path = warm_after_empty.output_dir },
-            .options = .{
-                .appdata = .{
-                    .corrupt_entry = .{ .name = "zig-0.14.0", .content = .too_big },
-                    // without cleaning this up, list-installed panics on the invalid version
-                    .old_lock_file = "zig-0.14.0.lock",
-                },
-            },
             .offline = true,
             .args = &.{ "any", "list-installed" },
         });
-        recover_too_big.run.addCheck(.{ .expect_stderr_match = "is invalid (too big" });
-        recover_too_big.run.addCheck(.{ .expect_stderr_match = "new hash added to anyzig store" });
-        recover_too_big.run.addCheck(.{ .expect_stderr_match = "left by an older version of anyzig" });
+        list_installed.run.addCheck(.{
+            .expect_stdout_match = "0.14.0\t",
+        });
+        list_installed.run.addCheck(.{
+            .expect_stdout_match = "anyzig" ++ std.fs.path.sep_str ++ "zig" ++ std.fs.path.sep_str ++ "0.14.0\n",
+        });
+        list_installed.run.expectExitCode(0);
 
-        const warm_after_too_big = test_factory.add(.{
-            .name = "test-cache-warm-after-recover-too-big",
-            .input_dir = .{ .path = recover_too_big.output_dir },
-            .options = .{ .appdata = .{} },
+        // Older versions of anyzig installed compilers in zig's global cache, these are
+        // copied to the new location when they're first used. Two processes migrate at
+        // once, only one of them copies it and the other uses that copy.
+        const migrate = test_factory.add(.{
+            .name = "test-migrate",
+            .input_dir = .{ .path = list_installed.output_dir },
+            .options = .{ .appdata = .{ .legacy_install = "0.14.0" } },
+            .offline = true,
+            .concurrent = .{ .count = 2, .install = "zig-0.14.0" },
+            .args = &.{"version"},
+        });
+        migrate.run.expectStdOutEqual("0.14.0\n0.14.0\n");
+        migrate.run.addCheck(.{ .expect_stderr_match = "where an older anyzig installed it" });
+        migrate.run.addCheck(.{ .expect_stderr_match = "copied zig-0.14.0" });
+
+        // the copy is used from then on, and the legacy install is left alone
+        const migrate_warm = test_factory.add(.{
+            .name = "test-migrate-warm",
+            .input_dir = .{ .path = migrate.output_dir },
+            .options = .{ .appdata = .{ .expect_legacy_install = "0.14.0" } },
             .offline = true,
             .args = &.{"version"},
         });
-        warm_after_too_big.run.expectStdOutEqual("0.14.0\n");
-        warm_after_too_big.run.addCheck(.{ .expect_stderr_match = "already exists" });
+        migrate_warm.run.expectStdOutEqual("0.14.0\n");
+        migrate_warm.run.addCheck(.{ .expect_stderr_match = "already exists" });
+
+        // Installs abandoned by processes that died are deleted, both the one for the
+        // version being installed and any others, and install directories without a lock file.
+        const abandoned = test_factory.add(.{
+            .name = "test-abandoned-install",
+            .input_dir = .{ .path = migrate_warm.output_dir },
+            .options = .{ .appdata = .{
+                .uninstall = "0.14.0",
+                .abandoned_installs = &.{ "zig-0.14.0", "zig-0.13.0" },
+                .lockless_installs = &.{"zig-0.12.0"},
+            } },
+            .offline = true,
+            .args = &.{"version"},
+        });
+        abandoned.run.expectStdOutEqual("0.14.0\n");
+        inline for (.{ "zig-0.14.0", "zig-0.13.0" }) |name| abandoned.run.addCheck(.{
+            .expect_stderr_match = "install" ++ std.fs.path.sep_str ++ name ++ "'",
+        });
+        abandoned.run.addCheck(.{
+            .expect_stderr_match = "install" ++ std.fs.path.sep_str ++ "zig-0.12.0', it has no lock file",
+        });
+        abandoned.run.addCheck(.{ .expect_stderr_match = "copied zig-0.14.0" });
+        const abandoned_warm = test_factory.add(.{
+            .name = "test-abandoned-install-warm",
+            .input_dir = .{ .path = abandoned.output_dir },
+            .options = .{ .appdata = .{ .expect_no_abandoned_installs = true } },
+            .offline = true,
+            .args = &.{"version"},
+        });
+        abandoned_warm.run.expectStdOutEqual("0.14.0\n");
+        abandoned_warm.run.addCheck(.{ .expect_stderr_match = "already exists" });
+
+        // a version directory without its exe (i.e. quarantined by antivirus) is replaced
+        const missing_exe = test_factory.add(.{
+            .name = "test-install-missing-exe",
+            .input_dir = .{ .path = abandoned_warm.output_dir },
+            .options = .{ .appdata = .{ .remove_exe = "0.14.0" } },
+            .offline = true,
+            .args = &.{"version"},
+        });
+        missing_exe.run.expectStdOutEqual("0.14.0\n");
+        missing_exe.run.addCheck(.{ .expect_stderr_match = "without 'zig" });
+        missing_exe.run.addCheck(.{ .expect_stderr_match = "copied zig-0.14.0" });
+
+        // an invalid hashstore entry is ignored (with a warning) even though the legacy
+        // install it used to point to is there, so the version is downloaded
+        const invalid_entry = test_factory.add(.{
+            .name = "test-cache-invalid-entry",
+            .input_dir = .{ .path = missing_exe.output_dir },
+            .options = .{ .appdata = .{
+                .uninstall = "0.14.0",
+                .corrupt_entry = .{ .name = "zig-0.14.0", .content = .empty },
+            } },
+            .args = &.{"version"},
+        });
+        invalid_entry.run.expectStdOutEqual("0.14.0\n");
+        invalid_entry.run.addCheck(.{ .expect_stderr_match = "is invalid (empty)" });
+        invalid_entry.run.addCheck(.{ .expect_stderr_match = "downloaded zig-0.14.0" });
+    }
+
+    // Concurrent installs of the same compiler wait for each other, only one of them
+    // downloads it and the others use that install.
+    {
+        const write_files = b.addWriteFiles();
+        _ = write_files.add("build.zig", "");
+        _ = write_files.add("build.zig.zon", ".{ .minimum_zig_version = \"0.14.0\" }\n");
+        const t = test_factory.add(.{
+            .name = "test-concurrent-fetch",
+            .input_dir = .{ .path = write_files.getDirectory() },
+            .options = .{ .appdata = .{} },
+            .concurrent = .{ .count = 2, .install = "zig-0.14.0" },
+            .args = &.{"version"},
+        });
+        t.run.expectStdOutEqual("0.14.0\n0.14.0\n");
     }
 
     // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
@@ -568,7 +649,7 @@ fn addTests(
         }
     }
 
-    {
+    if (opt.old_zig_builds) {
         const write_files = b.addWriteFiles();
         const build_zig_12 = write_files.add(
             "example-0.12.0/build.zig",
@@ -621,7 +702,7 @@ fn addTests(
                 .options = .nosetup,
                 .args = &.{ "build", "--build-file" },
             });
-            t.run.addFileArg(build_zig_12);
+            t.run.addFileArg2(build_zig_12, .{ .make_absolute = true });
             t.run.expectStdOutEqual("0.12.0\n");
         }
         {
@@ -631,7 +712,7 @@ fn addTests(
                 .options = .nosetup,
                 .args = &.{ "build", "--build-file" },
             });
-            t.run.addFileArg(build_zig_13);
+            t.run.addFileArg2(build_zig_13, .{ .make_absolute = true });
             t.run.expectStdOutEqual("0.13.0\n");
         }
     }
@@ -662,15 +743,33 @@ const TestFactory = struct {
             /// input directory is copied to the output directory, appdata state carries
             /// over to tests that use this test's output directory as their input.
             appdata: struct {
+                /// move this installed version to where older versions of anyzig installed
+                /// it (zig's global cache) with a hashstore entry pointing to it
+                legacy_install: ?[]const u8 = null,
+                /// fail unless the legacy install of this version is still there
+                expect_legacy_install: ?[]const u8 = null,
+                /// delete this installed version
+                uninstall: ?[]const u8 = null,
+                /// delete only the exe of this installed version, leaving its directory
+                remove_exe: ?[]const u8 = null,
+                /// create install directories (i.e. "zig-0.14.0") like ones left behind by
+                /// processes that died
+                abandoned_installs: []const []const u8 = &.{},
+                /// create install directories without a lock file
+                lockless_installs: []const []const u8 = &.{},
+                /// fail if any install directory is left
+                expect_no_abandoned_installs: bool = false,
                 /// overwrite a hashstore entry with invalid content before running
-                corrupt_entry: ?struct { name: []const u8, content: enum { empty, too_big } } = null,
-                /// create a lock file like the ones older versions of anyzig left behind
-                old_lock_file: ?[]const u8 = null,
+                corrupt_entry: ?struct { name: []const u8, content: enum { empty } } = null,
             },
         },
         /// Points the http proxies at a dead port so any attempt to use the network
         /// fails, i.e. to verify anyzig is using its cache.
         offline: bool = false,
+        /// Runs this many instances at once, holding the lock of this install (i.e.
+        /// "zig-0.14.0") until they're all waiting on it, then verifies exactly one of them
+        /// installed it and the others used that install. Requires appdata.
+        concurrent: ?struct { count: u8, install: []const u8 } = null,
         args: []const []const u8,
     }) TestAnyzig {
         const b = self.b;
@@ -694,15 +793,26 @@ const TestFactory = struct {
                     "--corrupt-entry={s}:{s}",
                     .{ @tagName(entry.content), entry.name },
                 ));
-                if (appdata.old_lock_file) |name| run.addArg(b.fmt("--old-lock-file={s}", .{name}));
-                // on macos the appdata directory is derived from HOME, which would also
-                // move the global cache, so we always set the global cache explicitly
-                run.addArg(b.fmt("--global-cache-dir={s}", .{b.graph.global_cache_root.path orelse "."}));
+                if (appdata.legacy_install) |v| run.addArg(b.fmt("--legacy-install={s}", .{v}));
+                if (appdata.expect_legacy_install) |v| run.addArg(b.fmt("--expect-legacy-install={s}", .{v}));
+                if (appdata.uninstall) |v| run.addArg(b.fmt("--uninstall={s}", .{v}));
+                if (appdata.remove_exe) |v| run.addArg(b.fmt("--remove-exe={s}", .{v}));
+                if (appdata.abandoned_installs.len > 0) run.addArg(b.fmt(
+                    "--abandoned-installs={s}",
+                    .{std.mem.join(b.allocator, ",", appdata.abandoned_installs) catch @panic("OOM")},
+                ));
+                if (appdata.lockless_installs.len > 0) run.addArg(b.fmt(
+                    "--lockless-installs={s}",
+                    .{std.mem.join(b.allocator, ",", appdata.lockless_installs) catch @panic("OOM")},
+                ));
+                if (appdata.expect_no_abandoned_installs) run.addArg("--expect-no-abandoned-installs");
             },
         }
         if (args.offline) run.addArg("--offline");
+        if (args.concurrent) |c| run.addArg(b.fmt("--concurrent={}:{s}", .{ c.count, c.install }));
         run.addArg("--");
-        run.addArtifactArg(self.anyzig);
+        // wrap changes the cwd, so paths are passed absolute
+        run.addArtifactArg2(self.anyzig, .{ .make_absolute = true });
         for (args.args) |a| {
             run.addArg(a);
         }
@@ -732,7 +842,7 @@ const ZigRelease = enum {
     @"2024.11.0-mach",
 
     pub fn getInitKind(self: ZigRelease) enum { simple, exe_and_lib } {
-        return if (@intFromEnum(self) >= @intFromEnum(ZigRelease.@"0.12.0")) .simple else .exe_and_lib;
+        return if (@backingInt(self) >= @backingInt(ZigRelease.@"0.12.0")) .simple else .exe_and_lib;
     }
     pub fn getVersionOutput(self: ZigRelease) []const u8 {
         return switch (self) {
@@ -782,7 +892,7 @@ fn addReleaseSteps(
         const target = b.resolveTargetQuery(try std.Target.Query.parse(
             .{ .arch_os_abi = release_target_str },
         ));
-        const optimize: std.builtin.OptimizeMode = .ReleaseSafe;
+        const optimize: std.lang.Optimize = .safe;
 
         const target_dest_dir: std.Build.InstallDir = .{ .custom = release_target_str };
 
@@ -825,6 +935,7 @@ fn addReleaseSteps(
         const target_test_step = b.step(b.fmt("test-{s}", .{release_target_str}), "");
         addTests(b, release_version, zig_exe, target_test_step, .{
             .make_build_steps = false,
+            .old_zig_builds = true,
         });
 
         if (host_supported) {
@@ -839,8 +950,8 @@ fn addReleaseSteps(
                 b,
                 release_target_str,
                 target.result,
-                target_dest_dir,
-                install_exes,
+                zig_exe,
+                zls_exe,
                 host_zip_exe,
             ));
         }
@@ -851,53 +962,34 @@ fn makeReleaseArchiveStep(
     b: *std.Build,
     release_target_str: []const u8,
     target: std.Target,
-    target_install_dir: std.Build.InstallDir,
-    install_exes: *std.Build.Step,
+    zig_exe: *std.Build.Step.Compile,
+    zls_exe: *std.Build.Step.Compile,
     host_zip_exe: *std.Build.Step.Compile,
 ) *std.Build.Step {
-    const install_path = b.getInstallPath(.prefix, ".");
-
     // not sure yet if we want to include zls.exe in our archives?
     const include_zls = false;
 
+    const stage = b.addWriteFiles();
+    _ = stage.addCopyFile(zig_exe.getEmittedBin(), zig_exe.out_filename);
+    if (include_zls) _ = stage.addCopyFile(zls_exe.getEmittedBin(), zls_exe.out_filename);
+
     if (target.os.tag == .windows) {
-        const out_zip_file = b.pathJoin(&.{
-            install_path,
-            b.fmt("anyzig-{s}.zip", .{release_target_str}),
-        });
+        _ = stage.addCopyFile(zig_exe.getEmittedPdb(), "zig.pdb");
+        if (include_zls) _ = stage.addCopyFile(zls_exe.getEmittedPdb(), "zls.pdb");
+        const basename = b.fmt("anyzig-{s}.zip", .{release_target_str});
         const zip = b.addRunArtifact(host_zip_exe);
-        zip.addArg(out_zip_file);
-        zip.addArg("zig.exe");
-        zip.addArg("zig.pdb");
-        if (include_zls) {
-            zip.addArg("zls.exe");
-            zip.addArg("zls.pdb");
-        }
-        zip.cwd = .{ .cwd_relative = b.getInstallPath(
-            target_install_dir,
-            ".",
-        ) };
-        zip.step.dependOn(install_exes);
-        return &zip.step;
+        const out_zip_file = zip.addOutputFileArg2(basename, .{});
+        zip.addArgs(&.{ "zig.exe", "zig.pdb" });
+        if (include_zls) zip.addArgs(&.{ "zls.exe", "zls.pdb" });
+        zip.setCwd(stage.getDirectory());
+        return &b.addInstallFile(out_zip_file, basename).step;
     }
 
-    const targz = b.pathJoin(&.{
-        install_path,
-        b.fmt("anyzig-{s}.tar.gz", .{release_target_str}),
-    });
-    const tar = b.addSystemCommand(&.{
-        "tar",
-        "-czf",
-        targz,
-        "zig",
-    });
-    if (include_zls) {
-        tar.addArg("zls");
-    }
-    tar.cwd = .{ .cwd_relative = b.getInstallPath(
-        target_install_dir,
-        ".",
-    ) };
-    tar.step.dependOn(install_exes);
-    return &tar.step;
+    const basename = b.fmt("anyzig-{s}.tar.gz", .{release_target_str});
+    const tar = b.addSystemCommand(&.{ "tar", "-czf" });
+    const targz = tar.addOutputFileArg2(basename, .{});
+    tar.addArg("zig");
+    if (include_zls) tar.addArg("zls");
+    tar.setCwd(stage.getDirectory());
+    return &b.addInstallFile(targz, basename).step;
 }

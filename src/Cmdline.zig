@@ -1,45 +1,30 @@
 //! Provides a platform abstraction for accessing cmdline args efficiently.
-//! Only allocates memory on Windows, uses std.os.argv on posix platforms.
+//! Only allocates memory on Windows, uses the args vector directly on posix platforms.
 const Cmdline = @This();
 
-win32_slice: switch (builtin.os.tag) {
-    .windows => [][:0]u8,
-    else => void,
+args: switch (builtin.os.tag) {
+    .windows => []const [:0]const u8,
+    else => std.process.Args,
 },
 
-pub fn alloc(allocator: std.mem.Allocator) !Cmdline {
+pub fn init(args: std.process.Args, arena: std.mem.Allocator) !Cmdline {
     return .{
-        .win32_slice = if (builtin.os.tag == .windows) try std.process.argsAlloc(allocator) else {},
+        .args = if (builtin.os.tag == .windows) try args.toSlice(arena) else args,
     };
-}
-
-pub fn free(self: Cmdline, allocator: std.mem.Allocator) void {
-    if (builtin.os.tag == .windows) {
-        allocator.free(self.win32_slice);
-    }
 }
 
 pub fn len(self: Cmdline) usize {
     return switch (builtin.os.tag) {
-        .windows => self.win32_slice.len,
-        else => std.os.argv.len,
+        .windows => self.args.len,
+        else => self.args.vector.len,
     };
 }
-pub fn arg(self: Cmdline, i: usize) [:0]u8 {
+pub fn arg(self: Cmdline, i: usize) [:0]const u8 {
     return switch (builtin.os.tag) {
-        .windows => self.win32_slice[i],
-        else => std.mem.span(std.os.argv[i]),
+        .windows => self.args[i],
+        else => std.mem.span(self.args.vector[i]),
     };
 }
-
-pub const Optional = switch (builtin.os.tag) {
-    .windows => ?Cmdline,
-    else => void,
-};
-pub const optional: Optional = switch (builtin.os.tag) {
-    .windows => null,
-    else => {},
-};
 
 const builtin = @import("builtin");
 const std = @import("std");

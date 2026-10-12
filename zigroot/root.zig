@@ -1,2 +1,1 @@
-pub const Package = @import("Package.zig");
-pub const introspect = @import("introspect.zig");
+pub const Package = @import("Maker/Package.zig");

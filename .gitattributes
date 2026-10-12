@@ -1,3 +1,4 @@
 *.zig text eol=lf
 *.zon text eol=lf
 *.txt text eol=lf
+*.patch text eol=lf
