@@ -12,6 +12,7 @@ pub fn main(init: std.process.Init) !u8 {
     const output_dir = all_args[2];
 
     var isolate_appdata = false;
+    var default_verbosity = false;
     var corrupt_entry: ?struct { content: []const u8, name: []const u8 } = null;
     var legacy_install: ?[]const u8 = null;
     var expect_legacy_install: ?[]const u8 = null;
@@ -31,6 +32,8 @@ pub fn main(init: std.process.Init) !u8 {
                 @panic("todo");
             } else if (std.mem.eql(u8, arg, "--appdata")) {
                 isolate_appdata = true;
+            } else if (std.mem.eql(u8, arg, "--default-verbosity")) {
+                default_verbosity = true;
             } else if (std.mem.startsWith(u8, arg, "--corrupt-entry=")) {
                 var it = std.mem.splitScalar(u8, arg["--corrupt-entry=".len..], ':');
                 const content = it.next().?;
@@ -62,9 +65,9 @@ pub fn main(init: std.process.Init) !u8 {
     };
     if (!isolate_appdata and (corrupt_entry != null or legacy_install != null or
         expect_legacy_install != null or uninstall != null or remove_exe != null or abandoned_installs != null or lockless_installs != null or
-        expect_no_abandoned_installs or concurrent != null)) std.debug.panic(
+        expect_no_abandoned_installs or concurrent != null or default_verbosity)) std.debug.panic(
         "--corrupt-entry, --legacy-install, --expect-legacy-install, --uninstall, --remove-exe, --abandoned-installs, --lockless-installs, " ++
-            "--expect-no-abandoned-installs and --concurrent require --appdata " ++
+            "--expect-no-abandoned-installs, --concurrent and --default-verbosity require --appdata " ++
             "(we never modify or inspect the real appdata)",
         .{},
     );
@@ -109,6 +112,16 @@ pub fn main(init: std.process.Init) !u8 {
             try std.process.currentPathAlloc(io, arena),
             legacy_cache_path,
         }));
+        if (default_verbosity) {
+            Dir.cwd().deleteFile(io, anyzig_appdata ++ "/verbosity") catch |err| switch (err) {
+                error.FileNotFound => {},
+                else => |e| return e,
+            };
+        } else {
+            // the tests check anyzig's info logs, which the default verbosity hides
+            try Dir.cwd().createDirPath(io, anyzig_appdata);
+            try Dir.cwd().writeFile(io, .{ .sub_path = anyzig_appdata ++ "/verbosity", .data = "debug\n" });
+        }
     }
     if (legacy_install) |version| {
         const install_path = try Dir.path.join(arena, &.{ installs_path, version });

@@ -804,7 +804,12 @@ fn anyCommand(cmdline: Cmdline, cmdline_offset: usize, app_data: AppData) !u8 {
             if (std.mem.eql(u8, level_str, "debug")) break :blk .debug;
             errExit("unknown VERBOSITY '{s}', expected 'warn' or 'debug'", .{level_str});
         };
-        {
+        if (level == logging.Verbosity.default) {
+            Dir.cwd().deleteFile(io, app_data.verbosity_path) catch |err| switch (err) {
+                error.FileNotFound => {},
+                else => |e| return pathErr("delete", app_data.verbosity_path, e),
+            };
+        } else {
             const tmp_path = Dir.path.join(global.arena, &.{ app_data.path, "tmp" }) catch |e| oom(e);
             defer global.arena.free(tmp_path);
             // every anyzig process reads this file, so replace it atomically, otherwise a
@@ -815,7 +820,7 @@ fn anyCommand(cmdline: Cmdline, cmdline_offset: usize, app_data: AppData) !u8 {
             try tmp_file.finish(io, app_data.verbosity_path);
         }
         switch (logging.readVerbosityFile(io, app_data)) {
-            .no_file => @panic("no file after writing it?"),
+            .no_file => std.debug.assert(level == logging.Verbosity.default),
             .loaded_from_file => |l| std.debug.assert(l == level),
         }
         return 0;

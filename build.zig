@@ -481,6 +481,17 @@ fn addTests(
         warm.run.expectStdOutEqual("0.14.0\n");
         warm.run.addCheck(.{ .expect_stderr_match = "already exists" });
 
+        // the default verbosity only shows warnings and errors
+        const default_verbosity = test_factory.add(.{
+            .name = "test-default-verbosity",
+            .input_dir = .{ .path = warm.output_dir },
+            .options = .{ .appdata = .{ .default_verbosity = true } },
+            .offline = true,
+            .args = &.{"version"},
+        });
+        default_verbosity.run.expectStdOutEqual("0.14.0\n");
+        default_verbosity.run.expectStdErrEqual("");
+
         const list_installed = test_factory.add(.{
             .name = "test-list-installed",
             .input_dir = .{ .path = warm.output_dir },
@@ -743,6 +754,8 @@ const TestFactory = struct {
             /// input directory is copied to the output directory, appdata state carries
             /// over to tests that use this test's output directory as their input.
             appdata: struct {
+                /// don't set the debug verbosity, the tests check anyzig's info logs so it's set by default
+                default_verbosity: bool = false,
                 /// move this installed version to where older versions of anyzig installed
                 /// it (zig's global cache) with a hashstore entry pointing to it
                 legacy_install: ?[]const u8 = null,
@@ -789,6 +802,7 @@ const TestFactory = struct {
             .badhash => run.addArg("--badhash"),
             .appdata => |appdata| {
                 run.addArg("--appdata");
+                if (appdata.default_verbosity) run.addArg("--default-verbosity");
                 if (appdata.corrupt_entry) |entry| run.addArg(b.fmt(
                     "--corrupt-entry={s}:{s}",
                     .{ @tagName(entry.content), entry.name },
