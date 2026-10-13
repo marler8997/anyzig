@@ -1,7 +1,7 @@
 pub const Verbosity = enum {
     debug,
     warn,
-    pub const default: Verbosity = .debug;
+    pub const default: Verbosity = .warn;
 };
 
 pub const global = struct {
