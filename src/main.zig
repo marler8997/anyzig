@@ -835,6 +835,14 @@ fn listInstalled(app_data: AppData) !void {
     };
     defer installs_dir.close(io);
 
+    const Installed = struct {
+        version: SemanticVersion,
+        name: []const u8,
+        fn lessThan(_: void, a: @This(), b: @This()) bool {
+            return a.version.ref().order(b.version.ref()) == .lt;
+        }
+    };
+    var installed: std.ArrayList(Installed) = .empty;
     var it = installs_dir.iterate();
     while (it.next(io) catch |err| return pathErr("iterate directory", installs_path, err)) |entry| {
         const kind = try entryKind(installs_dir, installs_path, entry);
@@ -850,7 +858,14 @@ fn listInstalled(app_data: AppData) !void {
             });
             continue;
         }
-        try filePrint(.stdout(), "{f}\t{s}{c}{s}\n", .{ version, installs_path, Dir.path.sep, entry.name });
+        installed.append(global.arena, .{
+            .version = version,
+            .name = global.arena.dupe(u8, entry.name) catch |e| oom(e),
+        }) catch |e| oom(e);
+    }
+    std.mem.sort(Installed, installed.items, {}, Installed.lessThan);
+    for (installed.items) |i| {
+        try filePrint(.stdout(), "{f}\t{s}{c}{s}\n", .{ i.version, installs_path, Dir.path.sep, i.name });
     }
 }
 
