@@ -122,6 +122,13 @@ pub fn build(b: *std.Build) !void {
             }),
         }));
         unit_test_step.dependOn(&hashstore_tests.step);
+        const lockfile_tests = b.addRunArtifact(b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/lockfile.zig"),
+                .target = b.graph.host,
+            }),
+        }));
+        unit_test_step.dependOn(&lockfile_tests.step);
     }
 
     const host_zip_exe = b.dependency("zip", .{

@@ -21,6 +21,7 @@ pub const log = std.log;
 const hashstore = @import("hashstore.zig");
 const Cmdline = @import("Cmdline.zig");
 const TmpFile = @import("TmpFile.zig");
+const lockfile = @import("lockfile.zig");
 const logging = @import("logging.zig");
 const AppData = @import("AppData.zig");
 
@@ -564,8 +565,8 @@ fn install(
     var lock_name_buf: [name_buf.buf.len + ".lock".len]u8 = undefined;
     const lock_name = std.fmt.bufPrint(&lock_name_buf, "{s}.lock", .{name}) catch unreachable;
     // never deleted, another process could be waiting on it
-    const lock_file = installing_dir.createFile(io, lock_name, .{ .truncate = false }) catch |err|
-        return entryErr("create", installing_path, lock_name, err);
+    const lock_file = lockfile.createOrOpen(io, installing_dir, lock_name) catch |err|
+        return entryErr("create or open", installing_path, lock_name, err);
     // releases the lock
     defer lock_file.close(io);
     if (!(lock_file.tryLock(io, .exclusive) catch |err| return entryErr("lock", installing_path, lock_name, err))) {
