@@ -22,20 +22,49 @@ const hashstore = @import("hashstore.zig");
 const Cmdline = @import("Cmdline.zig");
 const TmpFile = @import("TmpFile.zig");
 const lockfile = @import("lockfile.zig");
-const logging = @import("logging.zig");
-const AppData = @import("AppData.zig");
+const appdata = @import("appdata.zig");
 
 pub const std_options: std.Options = .{
-    .logFn = logging.logFn,
+    .logFn = logFn,
 };
+
+fn logFn(
+    comptime level: std.log.Level,
+    comptime scope: @EnumLiteral(),
+    comptime format: []const u8,
+    args: anytype,
+) void {
+    const scope_level = comptime (switch (scope) {
+        .default => switch (level) {
+            .info => "",
+            inline else => ": " ++ level.asText(),
+        },
+        else => |s| "(" ++ @tagName(s) ++ "): " ++ level.asText(),
+    });
+
+    switch (level) {
+        .err, .warn => {},
+        .info, .debug => if (!global.verbose) return,
+    }
+
+    var buffer: [256]u8 = undefined;
+    const stderr = std.debug.lockStderr(&buffer);
+    defer std.debug.unlockStderr();
+    const w = &stderr.file_writer.interface;
+    w.print("anyzig" ++ scope_level ++ ": " ++ format ++ "\n", args) catch return;
+    w.flush() catch return;
+}
 
 /// not global_single_threaded, it can't allocate and has no environ, which spawning needs
 var threaded: std.Io.Threaded = .init_single_threaded;
 const io = threaded.io();
 
 const exe_str = @tagName(build_options.exe);
+const verbose_env = "ANYZIG_VERBOSE";
 
 const global = struct {
+    var verbose = false;
+
     var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
     const gpa = debug_allocator.allocator();
     var arena_instance = std.heap.ArenaAllocator.init(gpa);
@@ -213,6 +242,7 @@ fn determineSemanticVersion(scratch: Allocator, build_root: BuildRoot) !Semantic
 }
 
 pub fn main(init: process.Init.Minimal) !void {
+    global.verbose = init.environ.containsUnemptyConstant(verbose_env);
     run(init) catch |err| switch (err) {
         error.Reported => process.exit(1),
         else => |e| return e,
@@ -233,9 +263,7 @@ fn run(init: process.Init.Minimal) !void {
     defer global.arena_instance.deinit();
     const arena = global.arena;
 
-    const app_data = try AppData.init(arena, init.environ);
-    logging.global.context = .{ .app_data = app_data, .io = io };
-    defer logging.global.context = null;
+    const app_data = try appdata.anyzigDir(arena, init.environ);
 
     const cmdline: Cmdline = try .init(init.args, arena);
 
@@ -307,16 +335,15 @@ fn run(init: process.Init.Minimal) !void {
         break :blk .{ .{ .semantic = try determineSemanticVersion(arena, build_root) }, false };
     };
 
-    const app_data_path = app_data.path;
-    log.info("appdata '{s}'", .{app_data_path});
+    log.info("appdata '{s}'", .{app_data});
 
     const semantic_version = semantic_version: switch (version_specifier) {
         .semantic => |v| v,
         .master => {
             const download_index_kind: DownloadIndexKind = .official;
-            const index_path = try Dir.path.join(arena, &.{ app_data_path, download_index_kind.basename() });
+            const index_path = try Dir.path.join(arena, &.{ app_data, download_index_kind.basename() });
             defer arena.free(index_path);
-            try fetchFile(arena, init.environ, app_data_path, download_index_kind.uri(), index_path);
+            try fetchFile(arena, init.environ, app_data, download_index_kind.uri(), index_path);
             // since we just downloaded the file, this should always succeed now
             const index_content = try Dir.cwd().readFileAlloc(io, index_path, arena, .unlimited);
             defer arena.free(index_content);
@@ -331,15 +358,15 @@ fn run(init: process.Init.Minimal) !void {
     const versioned_exe = std.fmt.bufPrintSentinel(
         &versioned_exe_buf,
         "{s}" ++ install_sub_path_fmt ++ exe_basename,
-        .{ app_data_path, semantic_version },
+        .{ app_data, semantic_version },
         0,
-    ) catch errExit("appdata path '{s}' is too long", .{app_data_path});
+    ) catch errExit("appdata path '{s}' is too long", .{app_data});
     const install_path = versioned_exe[0 .. versioned_exe.len - Dir.path.sep_str.len - exe_basename.len];
 
     if (Dir.cwd().access(io, versioned_exe, .{})) |_| {
         log.info("{s} '{f}' already exists at '{s}'", .{ exe_str, semantic_version, install_path });
     } else |err| switch (err) {
-        error.FileNotFound => try install(gpa, arena, init.environ, app_data_path, &semantic_version, install_path),
+        error.FileNotFound => try install(gpa, arena, init.environ, app_data, &semantic_version, install_path),
         else => |e| return pathErr("access", versioned_exe, e),
     }
 
@@ -620,14 +647,14 @@ fn install(
     gpa: Allocator,
     arena: Allocator,
     environ: process.Environ,
-    app_data_path: []const u8,
+    app_data: [:0]const u8,
     version: *const SemanticVersion,
     install_path: []const u8,
 ) !void {
     const name_buf = hashstoreName(version);
     const name = name_buf.slice();
 
-    const installing_path = try Dir.path.join(arena, &.{ app_data_path, "install" });
+    const installing_path = try Dir.path.join(arena, &.{ app_data, "install" });
     var installing_dir = Dir.cwd().createDirPathOpen(io, installing_path, .{
         .open_options = .{ .iterate = true },
     }) catch |err| return pathErr("create directory", installing_path, err);
@@ -684,7 +711,7 @@ fn install(
     }
 
     const prepared_path = try Dir.path.join(arena, &.{ installing_path, name });
-    if (try findLegacyInstall(arena, environ, app_data_path, name)) |legacy_path| {
+    if (try findLegacyInstall(arena, environ, app_data, name)) |legacy_path| {
         log.info("copying {s} from '{s}' where an older anyzig installed it", .{ name, legacy_path });
         {
             var src = Dir.cwd().openDir(io, legacy_path, .{ .iterate = true }) catch |err|
@@ -702,7 +729,7 @@ fn install(
         return;
     }
 
-    const url = try getVersionUrl(arena, environ, app_data_path, version.*);
+    const url = try getVersionUrl(arena, environ, app_data, version.*);
     defer url.deinit(arena);
     const hash = try cmdFetch(gpa, arena, environ, prepared_path, url.fetch);
     const fetched_path = try Dir.path.join(arena, &.{ prepared_path, hash.toSlice() });
@@ -820,13 +847,13 @@ fn entryErr(op: []const u8, dir_path: []const u8, name: []const u8, err: anyerro
 
 /// pre-0.17 anyzig installed into zig's global cache (p/<hash>, found via the hashstore).
 /// These are copied, not moved, it's zig's cache and older anyzig versions still use them.
-fn findLegacyInstall(arena: Allocator, environ: process.Environ, app_data_path: []const u8, name: []const u8) !?[]const u8 {
-    const hashstore_path = try Dir.path.join(arena, &.{ app_data_path, "hashstore" });
+fn findLegacyInstall(arena: Allocator, environ: process.Environ, app_data: [:0]const u8, name: []const u8) !?[]const u8 {
+    const hashstore_path = try Dir.path.join(arena, &.{ app_data, "hashstore" });
     const hash = switch (try hashstore.find(io, hashstore_path, name)) {
         .not_found, .invalid => return null,
         .found => |hash| hash,
     };
-    const global_cache_path = AppData.legacyGlobalCacheDir(arena, environ) orelse {
+    const global_cache_path = appdata.legacyGlobalCacheDir(arena, environ) orelse {
         log.info("hashstore has {s} but zig's global cache directory is unknown", .{name});
         return null;
     };
@@ -847,16 +874,15 @@ fn anyCommandUsage() !u8 {
         .stderr(),
         "any" ++ @tagName(build_options.exe) ++ " {s} from https://github.com/marler8997/anyzig\n" ++
             "Here are the anyzig-specific subcommands:\n" ++
-            "  zig any set-verbosity LEVEL    | sets the default system-wide verbosity\n" ++
-            "                                 | accepts 'warn' or 'debug'\n" ++
             "  zig any version                | print the version of anyzig to stdout\n" ++
-            "  zig any list-installed         | list all versions of zig installed by anyzig\n",
+            "  zig any list-installed         | list all versions of zig installed by anyzig\n" ++
+            "Set " ++ verbose_env ++ "=1 to log what anyzig is doing.\n",
         .{@embedFile("version")},
     );
     return 0xff;
 }
 
-fn anyCommand(cmdline: Cmdline, cmdline_offset: usize, app_data: AppData) !u8 {
+fn anyCommand(cmdline: Cmdline, cmdline_offset: usize, app_data: [:0]const u8) !u8 {
     if (cmdline_offset == cmdline.len()) {
         std.process.exit(try anyCommandUsage());
     }
@@ -868,34 +894,7 @@ fn anyCommand(cmdline: Cmdline, cmdline_offset: usize, app_data: AppData) !u8 {
         try filePrint(.stdout(), "{s}\n", .{@embedFile("version")});
         return 0;
     } else if (std.mem.eql(u8, command, "set-verbosity")) {
-        if (arg_offset >= cmdline.len()) errExit("missing VERBOSITY (either 'warn' or 'debug')", .{});
-        if (arg_offset + 1 < cmdline.len()) errExit("too many cmdline args", .{});
-        const level_str = cmdline.arg(arg_offset);
-        const level: logging.Verbosity = blk: {
-            if (std.mem.eql(u8, level_str, "warn")) break :blk .warn;
-            if (std.mem.eql(u8, level_str, "debug")) break :blk .debug;
-            errExit("unknown VERBOSITY '{s}', expected 'warn' or 'debug'", .{level_str});
-        };
-        if (level == logging.Verbosity.default) {
-            Dir.cwd().deleteFile(io, app_data.verbosity_path) catch |err| switch (err) {
-                error.FileNotFound => {},
-                else => |e| return pathErr("delete", app_data.verbosity_path, e),
-            };
-        } else {
-            const tmp_path = Dir.path.join(global.arena, &.{ app_data.path, "tmp" }) catch |e| oom(e);
-            defer global.arena.free(tmp_path);
-            // every anyzig process reads this file, so replace it atomically, otherwise a
-            // process could read it after it's been truncated but before it's written
-            var tmp_file = try TmpFile.create(io, tmp_path);
-            defer tmp_file.deinit(io);
-            try filePrint(tmp_file.file, "{s}\n", .{level_str});
-            try tmp_file.finish(io, app_data.verbosity_path);
-        }
-        switch (logging.readVerbosityFile(io, app_data)) {
-            .no_file => std.debug.assert(level == logging.Verbosity.default),
-            .loaded_from_file => |l| std.debug.assert(l == level),
-        }
-        return 0;
+        errExit("'set-verbosity' was removed, set " ++ verbose_env ++ "=1 to log what anyzig is doing", .{});
     } else if (std.mem.eql(u8, command, "list-installed")) {
         if (arg_offset < cmdline.len()) errExit("the 'list-installed' subcommand does not take any cmdline args", .{});
         try listInstalled(app_data);
@@ -903,8 +902,8 @@ fn anyCommand(cmdline: Cmdline, cmdline_offset: usize, app_data: AppData) !u8 {
     } else errExit("unknown zig any '{s}' command", .{command});
 }
 
-fn listInstalled(app_data: AppData) !void {
-    const installs_path = try Dir.path.join(global.arena, &.{ app_data.path, exe_str });
+fn listInstalled(app_data: [:0]const u8) !void {
+    const installs_path = try Dir.path.join(global.arena, &.{ app_data, exe_str });
 
     var installs_dir = Dir.cwd().openDir(io, installs_path, .{ .iterate = true }) catch |err| switch (err) {
         error.FileNotFound => return, // nothing installed yet
@@ -1155,7 +1154,7 @@ fn makeOfficialUrl(arena: Allocator, semantic_version: SemanticVersion) Download
 fn getVersionUrl(
     arena: Allocator,
     environ: process.Environ,
-    app_data_path: []const u8,
+    app_data: [:0]const u8,
     semantic_version: SemanticVersion,
 ) !DownloadUrl {
     if (build_options.exe == .zls) return DownloadUrl.initOfficial(std.fmt.allocPrint(
@@ -1173,7 +1172,7 @@ fn getVersionUrl(
     if (!isMachVersion(semantic_version)) return makeOfficialUrl(arena, semantic_version);
 
     const download_index_kind: DownloadIndexKind = .mach;
-    const index_path = try Dir.path.join(arena, &.{ app_data_path, download_index_kind.basename() });
+    const index_path = try Dir.path.join(arena, &.{ app_data, download_index_kind.basename() });
     defer arena.free(index_path);
 
     try_existing_index: {
@@ -1186,7 +1185,7 @@ fn getVersionUrl(
             return url;
     }
 
-    try fetchFile(arena, environ, app_data_path, download_index_kind.uri(), index_path);
+    try fetchFile(arena, environ, app_data, download_index_kind.uri(), index_path);
     // since we just downloaded the file, this should always succeed now
     const index_content = try Dir.cwd().readFileAlloc(io, index_path, arena, .unlimited);
     defer arena.free(index_content);
@@ -1256,7 +1255,7 @@ fn extractUrlFromMachDownloadIndex(
 fn fetchFile(
     scratch: Allocator,
     environ: process.Environ,
-    app_data_path: []const u8,
+    app_data: [:0]const u8,
     uri: std.Uri,
     out_filepath: []const u8,
 ) !void {
@@ -1278,7 +1277,7 @@ fn fetchFile(
     // Each process downloads to its own temporary file which is then atomically renamed
     // over out_filepath (see TmpFile). If multiple processes fetch at the same time they
     // each download the file and the last rename wins.
-    const tmp_path = Dir.path.join(scratch, &.{ app_data_path, "tmp" }) catch |e| oom(e);
+    const tmp_path = Dir.path.join(scratch, &.{ app_data, "tmp" }) catch |e| oom(e);
     defer scratch.free(tmp_path);
     var tmp_file = try TmpFile.create(io, tmp_path);
     defer tmp_file.deinit(io);

@@ -15,7 +15,7 @@ $ zig 0.14.0-dev.3028+cdc9d65b0 build-exe mynewerproject.zig
 
 Anyzig also adds a few of its own commands, which can be queried and invoked with `zig any ...`.
 
-By default anyzig only prints warnings and errors. To see what it's doing (where it found the version, downloads and installs), run `zig any set-verbosity debug`, and `zig any set-verbosity warn` to go back to the default.
+Set environment variable `ANYZIG_VERBOSE` to any non-empty value to enable verbose log output to stderr.
 
 # Install
 

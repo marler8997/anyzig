@@ -108,6 +108,7 @@ pub fn main(init: std.process.Init) !u8 {
     try std.process.setCurrentPath(io, output_dir);
 
     const env = init.environ_map;
+    _ = env.swapRemove("ANYZIG_VERBOSE");
     if (offline) {
         // point the http proxies at a dead port so any attempt to use the network fails
         for ([_][]const u8{ "http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY", "all_proxy", "ALL_PROXY" }) |name| {
@@ -126,16 +127,8 @@ pub fn main(init: std.process.Init) !u8 {
             try std.process.currentPathAlloc(io, arena),
             legacy_cache_path,
         }));
-        if (default_verbosity) {
-            Dir.cwd().deleteFile(io, anyzig_appdata ++ "/verbosity") catch |err| switch (err) {
-                error.FileNotFound => {},
-                else => |e| return e,
-            };
-        } else {
-            // the tests check anyzig's info logs, which the default verbosity hides
-            try Dir.cwd().createDirPath(io, anyzig_appdata);
-            try Dir.cwd().writeFile(io, .{ .sub_path = anyzig_appdata ++ "/verbosity", .data = "debug\n" });
-        }
+        // the tests check anyzig's info logs, which are hidden by default
+        if (!default_verbosity) try env.put("ANYZIG_VERBOSE", "1");
     }
     if (legacy_install) |version| {
         const install_path = try Dir.path.join(arena, &.{ installs_path, version });

@@ -275,7 +275,7 @@ fn addTests(
             .{version},
         ) });
         t.run.addCheck(.{ .expect_stderr_match = "zig any version" });
-        t.run.addCheck(.{ .expect_stderr_match = "zig any set-verbosity" });
+        t.run.addCheck(.{ .expect_stderr_match = "ANYZIG_VERBOSE=1" });
         t.run.expectExitCode(0xff);
     }
 
@@ -291,42 +291,13 @@ fn addTests(
 
     {
         const t = test_factory.add(.{
-            .name = "test-any-set-verbosity-none",
+            .name = "test-any-set-verbosity-removed",
             .input_dir = .no_input,
             .options = .nosetup,
-            .args = &.{ "any", "set-verbosity" },
+            .args = &.{ "any", "set-verbosity", "debug" },
         });
-        t.run.expectStdErrEqual("anyzig: error: missing VERBOSITY (either 'warn' or 'debug')\n");
-    }
-
-    {
-        const t = test_factory.add(.{
-            .name = "test-any-set-verbosity-too-many",
-            .input_dir = .no_input,
-            .options = .nosetup,
-            .args = &.{ "any", "set-verbosity", "warn", "debug" },
-        });
-        t.run.expectStdErrEqual("anyzig: error: too many cmdline args\n");
-    }
-
-    {
-        const t = test_factory.add(.{
-            .name = "test-any-set-verbosity-bad",
-            .input_dir = .no_input,
-            .options = .nosetup,
-            .args = &.{ "any", "set-verbosity", "whattheheck" },
-        });
-        t.run.expectStdErrEqual("anyzig: error: unknown VERBOSITY 'whattheheck', expected 'warn' or 'debug'\n");
-    }
-
-    {
-        const t = test_factory.add(.{
-            .name = "test-any-set-verbosity-warn",
-            .input_dir = .no_input,
-            .options = .{ .appdata = .{} },
-            .args = &.{ "any", "set-verbosity", "warn" },
-        });
-        t.run.expectStdErrEqual("");
+        t.run.expectStdErrEqual("anyzig: error: 'set-verbosity' was removed, set ANYZIG_VERBOSE=1 to log what anyzig is doing\n");
+        t.run.expectExitCode(1);
     }
 
     {
@@ -776,7 +747,7 @@ const TestFactory = struct {
             /// input directory is copied to the output directory, appdata state carries
             /// over to tests that use this test's output directory as their input.
             appdata: struct {
-                /// don't set the debug verbosity, the tests check anyzig's info logs so it's set by default
+                /// don't set ANYZIG_VERBOSE, the tests check anyzig's info logs so it's set by default
                 default_verbosity: bool = false,
                 /// move this installed version to where older versions of anyzig installed
                 /// it (zig's global cache) with a hashstore entry pointing to it
