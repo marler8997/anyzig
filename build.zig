@@ -181,7 +181,7 @@ fn makeCalVersion(io: std.Io) ![11]u8 {
     const formatted = try std.fmt.bufPrint(&buf, "v{d}_{d:0>2}_{d:0>2}", .{
         year_day.year,
         @backingInt(month_day.month),
-        month_day.day_index,
+        month_day.day_index + 1,
     });
     std.debug.assert(formatted.len == buf.len);
     return buf;
