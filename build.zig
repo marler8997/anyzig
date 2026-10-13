@@ -615,6 +615,21 @@ fn addTests(
         t.run.expectStdOutEqual("0.14.0\n0.14.0\n");
     }
 
+    // Windows has no execve so anyzig runs zig as a child process, which must die with
+    // anyzig (i.e. when an IDE or a CI timeout kills it), see the job in spawnWindows.
+    if (b.graph.host.result.os.tag == .windows) {
+        const t = test_factory.add(.{
+            .name = "test-kill",
+            .input_dir = .no_input,
+            .options = .{ .appdata = .{} },
+            .offline = true,
+            .kill = true,
+            .args = &.{},
+        });
+        t.run.expectExitCode(0);
+        t.run.addCheck(.{ .expect_stderr_match = "died with anyzig" });
+    }
+
     // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
     // TODO: finish this test
     if (false) {
@@ -790,6 +805,9 @@ const TestFactory = struct {
         /// "zig-0.14.0") until they're all waiting on it, then verifies exactly one of them
         /// installed it and the others used that install. Requires appdata.
         concurrent: ?struct { count: u8, install: []const u8 } = null,
+        /// Installs a fake zig that blocks on stdin, kills anyzig once it has started it and
+        /// fails unless it dies too. Takes no args, requires appdata. Windows only.
+        kill: bool = false,
         args: []const []const u8,
     }) TestAnyzig {
         const b = self.b;
@@ -831,6 +849,7 @@ const TestFactory = struct {
         }
         if (args.offline) run.addArg("--offline");
         if (args.concurrent) |c| run.addArg(b.fmt("--concurrent={}:{s}", .{ c.count, c.install }));
+        if (args.kill) run.addArg("--kill");
         run.addArg("--");
         // wrap changes the cwd, so paths are passed absolute
         run.addArtifactArg2(self.anyzig, .{ .make_absolute = true });

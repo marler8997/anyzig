@@ -346,9 +346,6 @@ fn run(init: process.Init.Minimal) !void {
     const stay_alive = is_init or (native_os == .windows);
 
     if (stay_alive) {
-        // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-        // TODO: if on windows, create a job so our child process gets killed if
-        //       our process gets killed
         if (native_os == .windows) {
             const windows = std.os.windows;
             const handle = try spawnWindows(arena, versioned_exe, cmdline, cmdline_offset);
@@ -514,6 +511,20 @@ fn spawnWindows(
         .cbReserved2 = 0,
         .lpReserved2 = null,
     };
+    // zig is killed if we are, its job is closed when we exit and breakaway keeps
+    // the processes zig starts out of it
+    // null attributes, the handle must not be inheritable, zig holding it would keep the job open
+    const job = win32.CreateJobObjectW(null, null) orelse
+        errExit("CreateJobObject failed, error={t}", .{windows.GetLastError()});
+    var limits = std.mem.zeroes(win32.JOBOBJECT_EXTENDED_LIMIT_INFORMATION);
+    limits.BasicLimitInformation.LimitFlags = win32.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | win32.JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK;
+    if (!win32.SetInformationJobObject(
+        job,
+        win32.JobObjectExtendedLimitInformation,
+        &limits,
+        @sizeOf(win32.JOBOBJECT_EXTENDED_LIMIT_INFORMATION),
+    ).toBool()) errExit("SetInformationJobObject failed, error={t}", .{windows.GetLastError()});
+
     var process_info: windows.PROCESS.INFORMATION = undefined;
     if (!windows.kernel32.CreateProcessW(
         exe_w,
@@ -521,15 +532,75 @@ fn spawnWindows(
         null,
         null,
         .TRUE,
-        .{},
+        .{ .create_suspended = true },
         null, // inherit our environment
         null,
         &startup_info,
         &process_info,
     ).toBool()) errExit("CreateProcess '{s}' failed, error={t}", .{ exe, windows.GetLastError() });
+    if (!win32.AssignProcessToJobObject(job, process_info.hProcess).toBool()) {
+        const err = windows.GetLastError();
+        _ = windows.ntdll.NtTerminateProcess(process_info.hProcess, .UNSUCCESSFUL);
+        errExit("AssignProcessToJobObject '{s}' failed, error={t}", .{ exe, err });
+    }
+    switch (windows.ntdll.NtResumeThread(process_info.hThread, null)) {
+        .SUCCESS => {},
+        else => |status| std.debug.panic("NtResumeThread failed, status={t}", .{status}),
+    }
     windows.CloseHandle(process_info.hThread);
     return process_info.hProcess;
 }
+
+const win32 = struct {
+    const windows = std.os.windows;
+    extern "kernel32" fn CreateJobObjectW(
+        lpJobAttributes: ?*windows.SECURITY_ATTRIBUTES,
+        lpName: ?windows.LPCWSTR,
+    ) callconv(.winapi) ?windows.HANDLE;
+    extern "kernel32" fn SetInformationJobObject(
+        hJob: windows.HANDLE,
+        JobObjectInformationClass: c_int,
+        lpJobObjectInformation: *const anyopaque,
+        cbJobObjectInformationLength: windows.DWORD,
+    ) callconv(.winapi) windows.BOOL;
+    extern "kernel32" fn AssignProcessToJobObject(
+        hJob: windows.HANDLE,
+        hProcess: windows.HANDLE,
+    ) callconv(.winapi) windows.BOOL;
+
+    const JobObjectExtendedLimitInformation = 9;
+    const JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK = 0x1000;
+    const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000;
+
+    const JOBOBJECT_EXTENDED_LIMIT_INFORMATION = extern struct {
+        BasicLimitInformation: extern struct {
+            PerProcessUserTimeLimit: windows.LARGE_INTEGER,
+            PerJobUserTimeLimit: windows.LARGE_INTEGER,
+            LimitFlags: windows.DWORD,
+            MinimumWorkingSetSize: usize,
+            MaximumWorkingSetSize: usize,
+            ActiveProcessLimit: windows.DWORD,
+            Affinity: usize,
+            PriorityClass: windows.DWORD,
+            SchedulingClass: windows.DWORD,
+        },
+        IoInfo: extern struct {
+            ReadOperationCount: u64,
+            WriteOperationCount: u64,
+            OtherOperationCount: u64,
+            ReadTransferCount: u64,
+            WriteTransferCount: u64,
+            OtherTransferCount: u64,
+        },
+        ProcessMemoryLimit: usize,
+        JobMemoryLimit: usize,
+        PeakProcessMemoryUsed: usize,
+        PeakJobMemoryUsed: usize,
+    };
+    comptime {
+        assert(@sizeOf(JOBOBJECT_EXTENDED_LIMIT_INFORMATION) == if (@sizeOf(usize) == 8) 144 else 112);
+    }
+};
 
 fn writeFilePrint(path: []const u8, comptime fmt: []const u8, args: anytype) !void {
     const file = try Dir.cwd().createFile(io, path, .{});

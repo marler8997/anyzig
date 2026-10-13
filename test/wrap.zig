@@ -7,6 +7,17 @@ pub fn main(init: std.process.Init) !u8 {
     const arena = init.arena.allocator();
     const all_args = try init.minimal.args.toSlice(arena);
 
+    // installed as a fake zig by --kill, blocks until stdin is closed
+    if (all_args.len == 2 and std.mem.eql(u8, all_args[1], fake_zig_arg)) {
+        var buf: [256]u8 = undefined;
+        while (true) {
+            _ = std.Io.File.stdin().readStreaming(io, &.{&buf}) catch |err| switch (err) {
+                error.EndOfStream => return 0,
+                else => |e| return e,
+            };
+        }
+    }
+
     // usage: wrap INPUT_DIR OUTPUT_DIR [SETUP_OPTIONS...] -- EXE ARGS...
     const input_dir = all_args[1];
     const output_dir = all_args[2];
@@ -22,6 +33,7 @@ pub fn main(init: std.process.Init) !u8 {
     var lockless_installs: ?[]const u8 = null;
     var expect_no_abandoned_installs = false;
     var offline = false;
+    var kill = false;
     var concurrent: ?struct { count: u8, install: []const u8 } = null;
     const exe_index = blk: {
         var i: usize = 3;
@@ -54,6 +66,8 @@ pub fn main(init: std.process.Init) !u8 {
                 remove_exe = arg["--remove-exe=".len..];
             } else if (std.mem.eql(u8, arg, "--offline")) {
                 offline = true;
+            } else if (std.mem.eql(u8, arg, "--kill")) {
+                kill = true;
             } else if (std.mem.startsWith(u8, arg, "--concurrent=")) {
                 // COUNT:INSTALL, i.e. 2:zig-0.14.0
                 var it = std.mem.splitScalar(u8, arg["--concurrent=".len..], ':');
@@ -65,9 +79,9 @@ pub fn main(init: std.process.Init) !u8 {
     };
     if (!isolate_appdata and (corrupt_entry != null or legacy_install != null or
         expect_legacy_install != null or uninstall != null or remove_exe != null or abandoned_installs != null or lockless_installs != null or
-        expect_no_abandoned_installs or concurrent != null or default_verbosity)) std.debug.panic(
+        expect_no_abandoned_installs or concurrent != null or default_verbosity or kill)) std.debug.panic(
         "--corrupt-entry, --legacy-install, --expect-legacy-install, --uninstall, --remove-exe, --abandoned-installs, --lockless-installs, " ++
-            "--expect-no-abandoned-installs, --concurrent and --default-verbosity require --appdata " ++
+            "--expect-no-abandoned-installs, --concurrent, --default-verbosity and --kill require --appdata " ++
             "(we never modify or inspect the real appdata)",
         .{},
     );
@@ -196,6 +210,19 @@ pub fn main(init: std.process.Init) !u8 {
     }
 
     const argv = all_args[exe_index..];
+    if (kill) {
+        if (builtin.os.tag != .windows) std.debug.panic(
+            "--kill is only for windows, elsewhere anyzig execs zig so they're the same process",
+            .{},
+        );
+        if (argv.len != 1) std.debug.panic("--kill takes no args after the exe, it runs the fake zig itself", .{});
+        // a real zig would mean copying a whole install, ourselves as zig.exe is enough
+        const fake_install_path = installs_path ++ "/" ++ fake_zig_version;
+        try Dir.cwd().createDirPath(io, fake_install_path);
+        const self_path = try std.process.executablePathAlloc(io, arena);
+        try Dir.copyFile(.cwd(), self_path, .cwd(), fake_install_path ++ "/zig.exe", io, .{});
+        return killAnyzig(io, &.{ argv[0], fake_zig_version, fake_zig_arg }, env);
+    }
     if (concurrent) |c| {
         // holds the install's lock until every process waits on it, then exactly one must install
         var children: [16]std.process.Child = undefined;
@@ -287,6 +314,121 @@ pub fn main(init: std.process.Init) !u8 {
         return 0xff;
     }
 }
+
+/// The fake zig --kill installs, anyzig runs it with "anyzig 9.9.9 fake-zig-block-stdin"
+/// (not a --option, anyzig expects a command after the version).
+const fake_zig_version = "9.9.9";
+const fake_zig_arg = "fake-zig-block-stdin";
+
+/// Kills anyzig while the fake zig is running and fails unless it dies with anyzig. The fake
+/// blocks reading stdin, which we keep open so it can't exit on its own. We don't use
+/// Child.kill or wait until the end, they close stdin.
+fn killAnyzig(io: std.Io, argv: []const []const u8, env: *std.process.Environ.Map) !u8 {
+    const windows = std.os.windows;
+    var child = try std.process.spawn(io, .{ .argv = argv, .environ_map = env, .stdin = .pipe });
+    const anyzig_pid = win32.GetProcessId(child.id.?);
+
+    // anyzig runs zig after it finds the install, find zig by its parent
+    const zig_pid = blk: {
+        const timeout_ms = 60_000;
+        var elapsed_ms: u32 = 0;
+        while (true) : (elapsed_ms += 10) {
+            if (try findChildProcess(anyzig_pid)) |pid| break :blk pid;
+            if (elapsed_ms >= timeout_ms) std.debug.panic("anyzig didn't start zig after {}ms", .{timeout_ms});
+            try io.sleep(.fromMilliseconds(10), .awake);
+        }
+    };
+    const zig_process = win32.OpenProcess(win32.SYNCHRONIZE | win32.PROCESS_TERMINATE, .FALSE, zig_pid) orelse
+        std.debug.panic("OpenProcess {} (zig) failed, error={t}", .{ zig_pid, windows.GetLastError() });
+    defer windows.CloseHandle(zig_process);
+
+    // zig must be blocked on stdin, otherwise it exiting proves nothing
+    try io.sleep(.fromMilliseconds(500), .awake);
+    if (win32.WaitForSingleObject(zig_process, 0) != win32.WAIT_TIMEOUT) {
+        var code: u32 = undefined;
+        _ = win32.GetExitCodeProcess(zig_process, &code);
+        std.debug.panic("zig (pid {}) exited on its own with code {} before anyzig was killed", .{ zig_pid, code });
+    }
+
+    if (!win32.TerminateProcess(child.id.?, 1).toBool()) std.debug.panic(
+        "TerminateProcess (anyzig) failed, error={t}",
+        .{windows.GetLastError()},
+    );
+    // not child.wait yet, it closes stdin
+    if (win32.WaitForSingleObject(child.id.?, win32.INFINITE) != win32.WAIT_OBJECT_0) std.debug.panic(
+        "WaitForSingleObject (anyzig) failed, error={t}",
+        .{windows.GetLastError()},
+    );
+    defer _ = child.wait(io) catch {};
+
+    const timeout_ms = 10_000;
+    switch (win32.WaitForSingleObject(zig_process, timeout_ms)) {
+        win32.WAIT_OBJECT_0 => {
+            std.log.info("zig (pid {}) died with anyzig (pid {})", .{ zig_pid, anyzig_pid });
+            return 0;
+        },
+        win32.WAIT_TIMEOUT => {
+            _ = win32.TerminateProcess(zig_process, 1);
+            std.log.err("zig (pid {}) was still running {}ms after anyzig (pid {}) was killed", .{ zig_pid, timeout_ms, anyzig_pid });
+            return 0xff;
+        },
+        else => |result| std.debug.panic("WaitForSingleObject returned {}, error={t}", .{ result, windows.GetLastError() }),
+    }
+}
+
+/// Returns the id of the zig.exe process whose parent is parent_pid. Matched by name too, a
+/// console app started without a console (i.e. by zig build) gets a conhost.exe child.
+fn findChildProcess(parent_pid: u32) !?u32 {
+    const windows = std.os.windows;
+    const snapshot = win32.CreateToolhelp32Snapshot(win32.TH32CS_SNAPPROCESS, 0);
+    if (snapshot == windows.INVALID_HANDLE_VALUE) std.debug.panic(
+        "CreateToolhelp32Snapshot failed, error={t}",
+        .{windows.GetLastError()},
+    );
+    defer windows.CloseHandle(snapshot);
+    var entry: win32.PROCESSENTRY32W = undefined;
+    entry.dwSize = @sizeOf(win32.PROCESSENTRY32W);
+    var ok = win32.Process32FirstW(snapshot, &entry).toBool();
+    while (ok) : (ok = win32.Process32NextW(snapshot, &entry).toBool()) {
+        if (entry.th32ParentProcessID != parent_pid) continue;
+        const name = std.mem.sliceTo(&entry.szExeFile, 0);
+        std.log.info("anyzig (pid {}) child process {} '{f}'", .{ parent_pid, entry.th32ProcessID, std.unicode.fmtUtf16Le(name) });
+        if (std.os.windows.eqlIgnoreCaseWtf16(name, std.unicode.utf8ToUtf16LeStringLiteral("zig.exe"))) return entry.th32ProcessID;
+    }
+    return null;
+}
+
+const win32 = struct {
+    const windows = std.os.windows;
+    extern "kernel32" fn GetProcessId(Process: windows.HANDLE) callconv(.winapi) u32;
+    extern "kernel32" fn OpenProcess(dwDesiredAccess: u32, bInheritHandle: windows.BOOL, dwProcessId: u32) callconv(.winapi) ?windows.HANDLE;
+    extern "kernel32" fn TerminateProcess(hProcess: windows.HANDLE, uExitCode: u32) callconv(.winapi) windows.BOOL;
+    extern "kernel32" fn GetExitCodeProcess(hProcess: windows.HANDLE, lpExitCode: *u32) callconv(.winapi) windows.BOOL;
+    extern "kernel32" fn WaitForSingleObject(hHandle: windows.HANDLE, dwMilliseconds: u32) callconv(.winapi) u32;
+    extern "kernel32" fn CreateToolhelp32Snapshot(dwFlags: u32, th32ProcessID: u32) callconv(.winapi) windows.HANDLE;
+    extern "kernel32" fn Process32FirstW(hSnapshot: windows.HANDLE, lppe: *PROCESSENTRY32W) callconv(.winapi) windows.BOOL;
+    extern "kernel32" fn Process32NextW(hSnapshot: windows.HANDLE, lppe: *PROCESSENTRY32W) callconv(.winapi) windows.BOOL;
+
+    const SYNCHRONIZE = 0x00100000;
+    const PROCESS_TERMINATE = 0x0001;
+    const TH32CS_SNAPPROCESS = 0x00000002;
+    const WAIT_OBJECT_0 = 0;
+    const WAIT_TIMEOUT = 0x102;
+    const INFINITE = 0xffffffff;
+
+    const PROCESSENTRY32W = extern struct {
+        dwSize: u32,
+        cntUsage: u32,
+        th32ProcessID: u32,
+        th32DefaultHeapID: usize,
+        th32ModuleID: u32,
+        cntThreads: u32,
+        th32ParentProcessID: u32,
+        pcPriClassBase: i32,
+        dwFlags: u32,
+        szExeFile: [260]u16,
+    };
+};
 
 fn checkSingleInstall(io: std.Io, path: []const u8) !void {
     var dir = try Dir.cwd().openDir(io, path, .{ .iterate = true });
