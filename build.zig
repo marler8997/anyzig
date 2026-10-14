@@ -887,9 +887,14 @@ fn addReleaseSteps(
     };
 
     const make_archive_step = b.step("archive", "Create release archives");
+    const hotpath_step = b.step(
+        "hotpath-check",
+        "Check the x86_64-linux release build's hot path against test/hotpath-budget.zon (requires strace and valgrind)",
+    );
     const host_supported = builtin.os.tag == .linux and builtin.cpu.arch == .x86_64;
     if (host_supported) {
         release_step.dependOn(make_archive_step);
+        release_step.dependOn(hotpath_step);
     } else {
         const fail = b.addFail(b.fmt(
             "releases can only be made on x86_64-linux but this host is {s}-{s}",
@@ -897,6 +902,7 @@ fn addReleaseSteps(
         ));
         release_step.dependOn(&fail.step);
         make_archive_step.dependOn(&fail.step);
+        hotpath_step.dependOn(&fail.step);
     }
 
     for (release_targets) |release_target_str| {
@@ -942,6 +948,18 @@ fn addReleaseSteps(
         install_exes.dependOn(
             &b.addInstallArtifact(zls_exe, .{ .dest_dir = .{ .override = target_dest_dir } }).step,
         );
+
+        if (host_supported and std.mem.eql(u8, release_target_str, "x86_64-linux")) {
+            const run = b.addRunArtifact(b.addExecutable(.{
+                .name = "hotpath",
+                .root_source_file = b.path("test/hotpath.zig"),
+                .target = b.graph.host,
+            }));
+            run.addArtifactArg(zig_exe);
+            _ = run.addOutputDirectoryArg("work");
+            run.expectExitCode(0);
+            hotpath_step.dependOn(&run.step);
+        }
 
         const target_test_step = b.step(b.fmt("test-{s}", .{release_target_str}), "");
         addTests(b, release_version, zig_exe, target_test_step, .{
