@@ -8,6 +8,10 @@
             .url = "git+https://github.com/ziglang/zig#7647adab80dd088f4de3610fd245915a912eb6ad",
             .hash = "zig-0.0.0-Fp4XJNPbSg7JHi19U9bkBViqpw1CEGENf1JhYBLHWjMq",
         },
+        .minizign = .{
+            .url = "git+https://github.com/jedisct1/zig-minisign#4bdf1637d966cdd401535c297c6860ea933536ea",
+            .hash = "minizign-0.1.14-gg18cVwiAQCB2XE1lUwcFhpLFK6_Q8AUQ4shgFTgpdwh",
+        },
         .zip = .{
             .url = "git+https://github.com/marler8997/zipcmdline#90289282eb4fa0b984e6d99cea9695e02fb043c2",
             .hash = "zipcmdline-0.0.0-DFii0-7PAACK7_UJ8gasN6DXAmgD5WABH2x6DNaljPQc",
@@ -21,6 +25,7 @@
         "build.zig",
         "build.zig.zon",
         "src",
+        "test",
         "zigroot",
     },
 }

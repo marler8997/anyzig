@@ -7,6 +7,8 @@ const Exe = enum { zig, zls };
 pub fn build(b: *std.Build) !void {
     // zig's build script gets the version from git, which the fetched package doesn't have
     const zig_dep = b.dependency("zig", .{ .@"version-string" = "0.17.0" });
+    const minizign_dep = b.dependency("minizign", .{ .@"no-cli" = true });
+    const minizign_mod = minizign_dep.module("minizign");
 
     const version_option: ?[11]u8 = if (b.option(
         []const u8,
@@ -53,6 +55,7 @@ pub fn build(b: *std.Build) !void {
                 .single_threaded = true,
                 .imports = &.{
                     .{ .name = "zig", .module = zig_mod },
+                    .{ .name = "minizign", .module = minizign_mod },
                     .{
                         .name = "version",
                         .module = if (b.graph.environ_map.get("HEW_BUILD_REVISION")) |r| b.createModule(.{
@@ -83,6 +86,7 @@ pub fn build(b: *std.Build) !void {
                 .single_threaded = true,
                 .imports = &.{
                     .{ .name = "zig", .module = zig_mod },
+                    .{ .name = "minizign", .module = minizign_mod },
                     .{ .name = "version", .module = dev_version_embed },
                 },
             }),
@@ -139,7 +143,7 @@ pub fn build(b: *std.Build) !void {
     const release_step = b.step("release", "Build/archive release executables for all targets and test the native one");
     release_step.dependOn(&install_version_release_file.step);
 
-    try addReleaseSteps(b, &release_version, release_version_embed, zig_mod, release_step, host_zip_exe);
+    try addReleaseSteps(b, &release_version, release_version_embed, zig_mod, minizign_mod, release_step, host_zip_exe);
 }
 
 fn verifyForceVersion(v: []const u8) [11]u8 {
@@ -868,6 +872,7 @@ fn addReleaseSteps(
     release_version: []const u8,
     release_version_embed: *std.Build.Module,
     zig_mod: *std.Build.Module,
+    minizign_mod: *std.Build.Module,
     release_step: *std.Build.Step,
     host_zip_exe: *std.Build.Step.Compile,
 ) !void {
@@ -917,6 +922,7 @@ fn addReleaseSteps(
                 .single_threaded = true,
                 .imports = &.{
                     .{ .name = "zig", .module = zig_mod },
+                    .{ .name = "minizign", .module = minizign_mod },
                     .{ .name = "version", .module = release_version_embed },
                 },
             }),
@@ -934,6 +940,7 @@ fn addReleaseSteps(
                 .single_threaded = true,
                 .imports = &.{
                     .{ .name = "zig", .module = zig_mod },
+                    .{ .name = "minizign", .module = minizign_mod },
                     .{ .name = "version", .module = release_version_embed },
                 },
             }),

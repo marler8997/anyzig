@@ -13,6 +13,7 @@ const Dir = std.Io.Dir;
 const File = std.Io.File;
 
 const zig = @import("zig");
+const minizign = @import("minizign");
 
 const Package = zig.Package;
 
@@ -731,7 +732,30 @@ fn install(
 
     const url = try getVersionUrl(arena, environ, app_data, version.*);
     defer url.deinit(arena);
-    const hash = try cmdFetch(gpa, arena, environ, prepared_path, url.fetch);
+
+    const fetchinfo: ?FetchInfo = if (!std.mem.startsWith(u8, url.fetch, "https://ziglang.org"))
+        null
+    else fetchinfo: {
+        var mirrors = try MirrorUrls.get(gpa, environ, app_data);
+        defer mirrors.deinit(gpa);
+        if (mirrors.list.items.len == 0) {
+            log.err("no zig mirrors found.", .{});
+            break :fetchinfo null;
+        }
+
+        const zig_archive_filename = url.fetch[std.mem.lastIndexOfScalar(u8, url.fetch, '/').? + 1 ..];
+
+        const download_path = try Dir.path.join(arena, &.{ app_data, "download" });
+        try Dir.cwd().createDirPath(io, download_path);
+        const fi = try mirrors.fetchFromAny(gpa, environ, app_data, download_path, zig_archive_filename);
+        break :fetchinfo fi;
+    };
+    defer {
+        if (fetchinfo) |fi| fi.deinit(gpa);
+    }
+
+    const fetch_target = if (fetchinfo) |fi| fi.archive_path else url.fetch;
+    const hash = try cmdFetch(gpa, arena, environ, prepared_path, fetch_target);
     const fetched_path = try Dir.path.join(arena, &.{ prepared_path, hash.toSlice() });
     try moveIntoPlace(fetched_path, install_path);
     log.info("downloaded {s} to '{s}'", .{ name, install_path });
@@ -1151,6 +1175,180 @@ fn makeOfficialUrl(arena: Allocator, semantic_version: SemanticVersion) Download
     };
 }
 
+const FetchInfo = struct {
+    archive_url: []const u8,
+    archive_path: []const u8,
+    minisign_url: []const u8,
+    minisign_path: []const u8,
+    const anyzig_mirror_url_query = "source=anyzig/" ++ @embedFile("version");
+
+    fn init(gpa: Allocator, tmpdir: []const u8, mirror_url: []const u8, filename: []const u8) !@This() {
+        const archive_url = try std.fmt.allocPrint(gpa, "{s}{s}{s}?{s}", .{
+            mirror_url,
+            if (std.mem.endsWith(u8, mirror_url, "/")) "" else "/",
+            filename,
+            anyzig_mirror_url_query,
+        });
+        errdefer gpa.free(archive_url);
+        const minisign_url = try std.fmt.allocPrint(gpa, "{s}{s}{s}.minisig?{s}", .{
+            mirror_url,
+            if (std.mem.endsWith(u8, mirror_url, "/")) "" else "/",
+            filename,
+            anyzig_mirror_url_query,
+        });
+        errdefer gpa.free(minisign_url);
+
+        const minisig_filename = try std.fmt.allocPrint(gpa, "{s}{s}", .{ filename, ".minisig" });
+        defer gpa.free(minisig_filename);
+
+        const minisign_path = try Dir.path.join(gpa, &.{
+            tmpdir,
+            minisig_filename,
+        });
+        return .{
+            .archive_url = archive_url,
+            .minisign_url = minisign_url,
+            .minisign_path = minisign_path,
+            .archive_path = minisign_path[0 .. minisign_path.len - ".minisig".len],
+        };
+    }
+
+    fn deinit(self: @This(), gpa: Allocator) void {
+        Dir.cwd().deleteFile(io, self.archive_path) catch |err| switch (err) {
+            error.FileNotFound => {},
+            else => |e| log.err("remove '{s}' failed with {t}", .{ self.archive_path, e }),
+        };
+        Dir.cwd().deleteFile(io, self.minisign_path) catch |err| switch (err) {
+            error.FileNotFound => {},
+            else => |e| log.err("remove '{s}' failed with {t}", .{ self.minisign_path, e }),
+        };
+        gpa.free(self.archive_url);
+        gpa.free(self.minisign_url);
+        gpa.free(self.minisign_path);
+        // do not free archive_path here, since its a slice of minisign_path
+    }
+
+    fn fetchAndValidate(self: @This(), gpa: Allocator, environ: process.Environ, app_data: [:0]const u8) !void {
+        var arena = std.heap.ArenaAllocator.init(gpa);
+        defer arena.deinit();
+
+        fetchFile(
+            arena.allocator(),
+            environ,
+            app_data,
+            try std.Uri.parse(self.archive_url),
+            self.archive_path,
+        ) catch |err| {
+            log.err("failed to download archive: {t} {s}", .{ err, self.archive_url });
+            return err;
+        };
+        fetchFile(
+            arena.allocator(),
+            environ,
+            app_data,
+            try std.Uri.parse(self.minisign_url),
+            self.minisign_path,
+        ) catch |err| {
+            log.err("failed to download signature: {t} {s}", .{ err, self.minisign_url });
+            return err;
+        };
+
+        self.validateMinisign(gpa) catch |err| {
+            log.err("failed to validate: {t} {s}", .{ err, self.archive_url });
+            return err;
+        };
+    }
+
+    const zig_org_minisign_pubkey = minizign.PublicKey.decodeFromBase64("RWSGOq2NVecA2UPNdBUZykf1CCb147pkmdtYxgb3Ti+JO/wCYvhbAb/U") catch unreachable;
+
+    fn validateMinisign(self: @This(), gpa: Allocator) !void {
+        const sig_bytes = try Dir.cwd().readFileAlloc(io, self.minisign_path, gpa, .unlimited);
+        defer gpa.free(sig_bytes);
+
+        const archive_file = try Dir.cwd().openFile(io, self.archive_path, .{});
+        defer archive_file.close(io);
+
+        var sig = try minizign.Signature.decode(gpa, sig_bytes);
+        defer sig.deinit();
+
+        try zig_org_minisign_pubkey.verifyFile(
+            gpa,
+            io,
+            archive_file,
+            sig,
+            null,
+        );
+    }
+};
+
+pub const MirrorUrls = struct {
+    list: std.ArrayListUnmanaged([]const u8) = .empty,
+    const mirrorlist = struct {
+        const url = "https://ziglang.org/download/community-mirrors.txt";
+        const uri = std.Uri.parse(url) catch unreachable;
+    };
+
+    fn get(
+        gpa: Allocator,
+        environ: process.Environ,
+        app_data: [:0]const u8,
+    ) !@This() {
+        const mirrorlist_path = try Dir.path.join(gpa, &.{ app_data, "community-mirrors.txt" });
+        defer gpa.free(mirrorlist_path);
+        var self: @This() = .{};
+
+        var arena = std.heap.ArenaAllocator.init(gpa);
+        defer arena.deinit();
+        fetchFile(arena.allocator(), environ, app_data, mirrorlist.uri, mirrorlist_path) catch {
+            log.err("failed to fetch mirrorlist to: {s}", .{mirrorlist_path});
+        };
+
+        const mirrors_content = Dir.cwd().readFileAlloc(io, mirrorlist_path, gpa, .unlimited) catch |err| switch (err) {
+            error.FileNotFound => return self,
+            else => |e| return pathErr("read", mirrorlist_path, e),
+        };
+        defer gpa.free(mirrors_content);
+
+        var iter = std.mem.splitScalar(u8, mirrors_content, '\n');
+        while (iter.next()) |mirror| {
+            const mirror_without_whitespace = std.mem.trim(u8, mirror, &std.ascii.whitespace);
+            if (mirror_without_whitespace.len > 0) {
+                try self.list.append(gpa, try gpa.dupe(u8, mirror_without_whitespace));
+            }
+        }
+        const io_src: std.Random.IoSource = .{ .io = io };
+        io_src.interface().shuffle([]const u8, self.list.items);
+        return self;
+    }
+
+    fn fetchFromAny(
+        self: @This(),
+        gpa: Allocator,
+        environ: process.Environ,
+        app_data: [:0]const u8,
+        tmpdir: []const u8,
+        filename: []const u8,
+    ) !FetchInfo {
+        for (self.list.items) |mirror_url| {
+            const fetchinfo = try FetchInfo.init(gpa, tmpdir, mirror_url, filename);
+            fetchinfo.fetchAndValidate(gpa, environ, app_data) catch {
+                fetchinfo.deinit(gpa);
+                continue;
+            };
+            return fetchinfo;
+        }
+        log.err("ran out of mirrors for: {s}", .{filename});
+        return error.NoMoreMirrors;
+    }
+
+    fn deinit(self: *@This(), gpa: Allocator) void {
+        for (self.list.items) |mirror| {
+            gpa.free(mirror);
+        }
+        self.list.deinit(gpa);
+    }
+};
+
 fn getVersionUrl(
     arena: Allocator,
     environ: process.Environ,
@@ -1264,7 +1462,7 @@ fn fetchFile(
 
     const progress_node_name = std.fmt.allocPrint(scratch, "fetch {f}", .{uri}) catch |e| oom(e);
     defer scratch.free(progress_node_name);
-    const node = root.start(progress_node_name, 1);
+    const node = root.start(progress_node_name, 0);
     defer node.end();
 
     var client: std.http.Client = .{ .allocator = scratch, .io = io };
@@ -1406,7 +1604,7 @@ fn cmdFetch(
     };
     defer fetch.deinit();
 
-    log.info("downloading '{s}'...", .{url});
+    log.info("cacheing '{s}'...", .{url});
     const failed = if (fetch.run()) false else |err| switch (err) {
         error.OutOfMemory => errExit("out of memory", .{}),
         error.Canceled => unreachable, // we never cancel
