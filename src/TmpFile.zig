@@ -116,7 +116,7 @@ fn renameReplace(io: std.Io, tmp_dir: std.Io.Dir, tmp_name: []const u8, dest_pat
             else => |e| return e,
         };
         // this is the only evidence the retry path runs, i.e. for verifying it on windows
-        if (retries > 0) std.log.info(
+        if (retries > 0) std.log.debug(
             "replaced '{s}' after {} retries ({}ms), it was in use",
             .{ dest_path, retries, total_ms },
         );
@@ -146,7 +146,7 @@ fn cleanAbandoned(io: std.Io, dir: std.Io.Dir, dir_path: []const u8) !void {
         // locked means its owner is still alive
         const locked = tryLock(io, file) catch |e| return logTmpErr("lock", dir_path, entry.name, e);
         if (!locked) continue;
-        std.log.info("deleting abandoned temporary file '{s}{c}{s}'", .{ dir_path, std.Io.Dir.path.sep, entry.name });
+        std.log.debug("deleting abandoned temporary file '{s}{c}{s}'", .{ dir_path, std.Io.Dir.path.sep, entry.name });
         // delete while we still hold the lock so its owner (if it's in the window
         // between creating and locking it) will see it's been deleted
         dir.deleteFile(io, entry.name) catch |err| switch (err) {

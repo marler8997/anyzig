@@ -7,8 +7,6 @@ const Exe = enum { zig, zls };
 pub fn build(b: *std.Build) !void {
     // zig's build script gets the version from git, which the fetched package doesn't have
     const zig_dep = b.dependency("zig", .{ .@"version-string" = "0.17.0" });
-    const minizign_dep = b.dependency("minizign", .{ .@"no-cli" = true });
-    const minizign_mod = minizign_dep.module("minizign");
 
     const version_option: ?[11]u8 = if (b.option(
         []const u8,
@@ -55,7 +53,6 @@ pub fn build(b: *std.Build) !void {
                 .single_threaded = true,
                 .imports = &.{
                     .{ .name = "zig", .module = zig_mod },
-                    .{ .name = "minizign", .module = minizign_mod },
                     .{
                         .name = "version",
                         .module = if (b.graph.environ_map.get("HEW_BUILD_REVISION")) |r| b.createModule(.{
@@ -86,7 +83,6 @@ pub fn build(b: *std.Build) !void {
                 .single_threaded = true,
                 .imports = &.{
                     .{ .name = "zig", .module = zig_mod },
-                    .{ .name = "minizign", .module = minizign_mod },
                     .{ .name = "version", .module = dev_version_embed },
                 },
             }),
@@ -111,28 +107,14 @@ pub fn build(b: *std.Build) !void {
     {
         const unit_test_step = b.step("unit-test", "Run the unit tests");
         test_step.dependOn(unit_test_step);
-        const tmp_file_tests = b.addRunArtifact(b.addTest(.{
+        const unit_tests = b.addRunArtifact(b.addTest(.{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("src/TmpFile.zig"),
-                .target = b.graph.host,
-            }),
-        }));
-        unit_test_step.dependOn(&tmp_file_tests.step);
-        const hashstore_tests = b.addRunArtifact(b.addTest(.{
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("src/hashstore.zig"),
+                .root_source_file = b.path("src/test.zig"),
                 .target = b.graph.host,
                 .imports = &.{.{ .name = "zig", .module = zig_mod }},
             }),
         }));
-        unit_test_step.dependOn(&hashstore_tests.step);
-        const lockfile_tests = b.addRunArtifact(b.addTest(.{
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("src/lockfile.zig"),
-                .target = b.graph.host,
-            }),
-        }));
-        unit_test_step.dependOn(&lockfile_tests.step);
+        unit_test_step.dependOn(&unit_tests.step);
     }
 
     const host_zip_exe = b.dependency("zip", .{
@@ -143,7 +125,7 @@ pub fn build(b: *std.Build) !void {
     const release_step = b.step("release", "Build/archive release executables for all targets and test the native one");
     release_step.dependOn(&install_version_release_file.step);
 
-    try addReleaseSteps(b, &release_version, release_version_embed, zig_mod, minizign_mod, release_step, host_zip_exe);
+    try addReleaseSteps(b, &release_version, release_version_embed, zig_mod, release_step, host_zip_exe);
 }
 
 fn verifyForceVersion(v: []const u8) [11]u8 {
@@ -452,6 +434,8 @@ fn addTests(
         });
         cold.run.expectStdOutEqual("0.14.0\n");
         cold.run.addCheck(.{ .expect_stderr_match = "downloaded zig-0.14.0" });
+        // from a community mirror
+        cold.run.addCheck(.{ .expect_stderr_match = " from https://" });
 
         const warm = test_factory.add(.{
             .name = "test-cache-warm",
@@ -463,7 +447,7 @@ fn addTests(
         warm.run.expectStdOutEqual("0.14.0\n");
         warm.run.addCheck(.{ .expect_stderr_match = "already exists" });
 
-        // the default verbosity only shows warnings and errors
+        // the default verbosity only shows info, warnings and errors, there are none since it's installed
         const default_verbosity = test_factory.add(.{
             .name = "test-default-verbosity",
             .input_dir = .{ .path = warm.output_dir },
@@ -588,6 +572,120 @@ fn addTests(
             .args = &.{"version"},
         });
         t.run.expectStdOutEqual("0.14.0\n0.14.0\n");
+    }
+
+    {
+        const t = test_factory.add(.{
+            .name = "test-not-a-release",
+            .input_dir = .no_input,
+            .options = .{ .appdata = .{} },
+            .args = &.{ "12.2.1", "version" },
+        });
+        t.run.addCheck(.{ .expect_stderr_match = "zig 12.2.1 is not a release" });
+        t.run.expectExitCode(1);
+    }
+
+    // The saved download index is checked before fetching it. These are offline with a version
+    // that doesn't exist so they fail once they get past the check.
+    {
+        // the key is found when it has escapes, after skipping a nested value and a longer key
+        const t = test_factory.add(.{
+            .name = "test-index-escaped-key",
+            .input_dir = .no_input,
+            .options = .{ .appdata = .{ .saved_index =
+            \\{"master":{"0.99.0":{"a":[1,{"b":"0.99.0"}]}},"0.99.0x":{},"0.\u00399.0":{}}
+            } },
+            .offline = true,
+            .args = &.{ "0.99.0", "version" },
+        });
+        t.run.addCheck(.{ .expect_stderr_match = "zig 0.99.0 is in the saved download index" });
+        t.run.expectExitCode(1);
+    }
+    {
+        // nested, longer, shorter and escaped-longer keys don't match
+        const t = test_factory.add(.{
+            .name = "test-index-similar-keys",
+            .input_dir = .no_input,
+            .options = .{ .appdata = .{ .saved_index =
+            \\{"master":{"0.99.0":{}},"0.99.0x":{},"0.99.":{},"0.\u00399.0.1":{}}
+            } },
+            .offline = true,
+            .args = &.{ "0.99.0", "version" },
+        });
+        t.run.addCheck(.{ .expect_stderr_match = "can't check that zig 0.99.0 is a release" });
+        t.run.expectExitCode(1);
+    }
+    {
+        const t = test_factory.add(.{
+            .name = "test-index-invalid",
+            .input_dir = .no_input,
+            .options = .{ .appdata = .{ .saved_index = "{\"0.1.0\":[" } },
+            .offline = true,
+            .args = &.{ "0.99.0", "version" },
+        });
+        t.run.addCheck(.{ .expect_stderr_match = "download-index.json' is invalid JSON (UnexpectedEndOfInput)" });
+        t.run.expectExitCode(1);
+    }
+
+    // The mirror tests use a dev build that doesn't exist (ziglang.org deletes old ones) and
+    // make ziglang.org unreachable, so they fail once anyzig falls back to it.
+    const missing_dev_version = "0.15.0-dev.1+aaaaaaaaa";
+    {
+        // a 404 means the file likely doesn't exist, so anyzig tries ziglang.org rather than
+        // every other mirror. Downloads are logged by default.
+        const t = test_factory.add(.{
+            .name = "test-mirror-not-found",
+            .input_dir = .no_input,
+            .options = .{ .appdata = .{ .default_verbosity = true, .mirror = .@"not-found" } },
+            .args = &.{ missing_dev_version, "version" },
+        });
+        t.run.addCheck(.{ .expect_stderr_match = "anyzig: downloading zig-" });
+        t.run.addCheck(.{ .expect_stderr_match = " from http://127.0.0.1:" });
+        t.run.addCheck(.{ .expect_stderr_match = "trying ziglang.org instead of the other mirrors" });
+        t.run.addCheck(.{ .expect_stderr_match = "anyzig: downloading https://ziglang.org/builds/zig-" });
+        t.run.addCheck(.{ .expect_stderr_match = "fake mirror served 1 requests" });
+        t.run.expectExitCode(1);
+    }
+    {
+        // a mirror can't serve another signed file, i.e. an older version
+        const t = test_factory.add(.{
+            .name = "test-mirror-wrong-file",
+            .input_dir = .no_input,
+            .options = .{ .appdata = .{ .mirror = .@"wrong-file" } },
+            .args = &.{ missing_dev_version, "version" },
+        });
+        t.run.addCheck(.{ .expect_stderr_match = "served the signature for 'zig-x86_64-linux-0.14.1.tar.xz' instead of 'zig-" });
+        t.run.addCheck(.{ .expect_stderr_match = "no mirror could provide" });
+        // both signatures, neither archive
+        t.run.addCheck(.{ .expect_stderr_match = "fake mirror served 2 requests" });
+        t.run.expectExitCode(1);
+    }
+    // the fake mirror only has the signature for this platform's archive
+    if (b.graph.host.result.os.tag == .linux and b.graph.host.result.cpu.arch == .x86_64) {
+        // the archive must match the signature
+        const t = test_factory.add(.{
+            .name = "test-mirror-bad-content",
+            .input_dir = .no_input,
+            .options = .{ .appdata = .{ .mirror = .@"bad-content" } },
+            .args = &.{ "0.14.1", "version" },
+        });
+        t.run.addCheck(.{ .expect_stderr_match = "can't check that zig 0.14.1 is a release" });
+        t.run.addCheck(.{ .expect_stderr_match = "served 'zig-x86_64-linux-0.14.1.tar.xz' with an invalid signature" });
+        t.run.addCheck(.{ .expect_stderr_match = "fake mirror served 4 requests" });
+        t.run.expectExitCode(1);
+    }
+    {
+        // the saved community mirror list is used when ziglang.org is down, and its mirrors must be https
+        const t = test_factory.add(.{
+            .name = "test-saved-mirrors",
+            .input_dir = .no_input,
+            .options = .{ .appdata = .{ .saved_mirrors = &.{ "http://127.0.0.1:1/insecure", "https://127.0.0.1:1/saved" } } },
+            .offline = true,
+            .args = &.{ missing_dev_version, "version" },
+        });
+        t.run.addCheck(.{ .expect_stderr_match = "ignoring 'http://127.0.0.1:1/insecure'" });
+        t.run.addCheck(.{ .expect_stderr_match = " from https://127.0.0.1:1/saved" });
+        t.run.expectExitCode(1);
     }
 
     // Windows has no execve so anyzig runs zig as a child process, which must die with
@@ -771,6 +869,13 @@ const TestFactory = struct {
                 expect_no_abandoned_installs: bool = false,
                 /// overwrite a hashstore entry with invalid content before running
                 corrupt_entry: ?struct { name: []const u8, content: enum { empty } } = null,
+                /// set ANYZIG_MIRRORS to two mirrors served by a fake mirror (see MirrorMode in
+                /// wrap.zig) and make ziglang.org unreachable
+                mirror: ?enum { @"not-found", @"wrong-file", @"bad-content" } = null,
+                /// save these as the community mirror list from a previous download
+                saved_mirrors: []const []const u8 = &.{},
+                /// save this as the official download index from a previous download
+                saved_index: ?[]const u8 = null,
             },
         },
         /// Points the http proxies at a dead port so any attempt to use the network
@@ -820,6 +925,12 @@ const TestFactory = struct {
                     .{std.mem.join(b.allocator, ",", appdata.lockless_installs) catch @panic("OOM")},
                 ));
                 if (appdata.expect_no_abandoned_installs) run.addArg("--expect-no-abandoned-installs");
+                if (appdata.mirror) |mode| run.addArg(b.fmt("--mirror={t}", .{mode}));
+                if (appdata.saved_index) |content| run.addArg(b.fmt("--saved-index={s}", .{content}));
+                if (appdata.saved_mirrors.len > 0) run.addArg(b.fmt(
+                    "--saved-mirrors={s}",
+                    .{std.mem.join(b.allocator, ",", appdata.saved_mirrors) catch @panic("OOM")},
+                ));
             },
         }
         if (args.offline) run.addArg("--offline");
@@ -872,7 +983,6 @@ fn addReleaseSteps(
     release_version: []const u8,
     release_version_embed: *std.Build.Module,
     zig_mod: *std.Build.Module,
-    minizign_mod: *std.Build.Module,
     release_step: *std.Build.Step,
     host_zip_exe: *std.Build.Step.Compile,
 ) !void {
@@ -922,7 +1032,6 @@ fn addReleaseSteps(
                 .single_threaded = true,
                 .imports = &.{
                     .{ .name = "zig", .module = zig_mod },
-                    .{ .name = "minizign", .module = minizign_mod },
                     .{ .name = "version", .module = release_version_embed },
                 },
             }),
@@ -940,7 +1049,6 @@ fn addReleaseSteps(
                 .single_threaded = true,
                 .imports = &.{
                     .{ .name = "zig", .module = zig_mod },
-                    .{ .name = "minizign", .module = minizign_mod },
                     .{ .name = "version", .module = release_version_embed },
                 },
             }),

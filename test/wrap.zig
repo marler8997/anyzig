@@ -35,6 +35,9 @@ pub fn main(init: std.process.Init) !u8 {
     var offline = false;
     var kill = false;
     var concurrent: ?struct { count: u8, install: []const u8 } = null;
+    var mirror: ?MirrorMode = null;
+    var saved_mirrors: ?[]const u8 = null;
+    var saved_index: ?[]const u8 = null;
     const exe_index = blk: {
         var i: usize = 3;
         while (i < all_args.len) : (i += 1) {
@@ -68,6 +71,13 @@ pub fn main(init: std.process.Init) !u8 {
                 offline = true;
             } else if (std.mem.eql(u8, arg, "--kill")) {
                 kill = true;
+            } else if (std.mem.startsWith(u8, arg, "--mirror=")) {
+                mirror = std.meta.stringToEnum(MirrorMode, arg["--mirror=".len..]) orelse
+                    std.debug.panic("unknown mirror mode '{s}'", .{arg["--mirror=".len..]});
+            } else if (std.mem.startsWith(u8, arg, "--saved-mirrors=")) {
+                saved_mirrors = arg["--saved-mirrors=".len..];
+            } else if (std.mem.startsWith(u8, arg, "--saved-index=")) {
+                saved_index = arg["--saved-index=".len..];
             } else if (std.mem.startsWith(u8, arg, "--concurrent=")) {
                 // COUNT:INSTALL, i.e. 2:zig-0.14.0
                 var it = std.mem.splitScalar(u8, arg["--concurrent=".len..], ':');
@@ -79,9 +89,9 @@ pub fn main(init: std.process.Init) !u8 {
     };
     if (!isolate_appdata and (corrupt_entry != null or legacy_install != null or
         expect_legacy_install != null or uninstall != null or remove_exe != null or abandoned_installs != null or lockless_installs != null or
-        expect_no_abandoned_installs or concurrent != null or default_verbosity or kill)) std.debug.panic(
+        expect_no_abandoned_installs or concurrent != null or default_verbosity or kill or mirror != null or saved_mirrors != null or saved_index != null)) std.debug.panic(
         "--corrupt-entry, --legacy-install, --expect-legacy-install, --uninstall, --remove-exe, --abandoned-installs, --lockless-installs, " ++
-            "--expect-no-abandoned-installs, --concurrent, --default-verbosity and --kill require --appdata " ++
+            "--expect-no-abandoned-installs, --concurrent, --default-verbosity, --kill, --mirror, --saved-mirrors and --saved-index require --appdata " ++
             "(we never modify or inspect the real appdata)",
         .{},
     );
@@ -186,6 +196,15 @@ pub fn main(init: std.process.Init) !u8 {
         const exe_path = try Dir.path.join(arena, &.{ installs_path, version, "zig" ++ comptime builtin.target.exeFileExt() });
         try Dir.cwd().deleteFile(io, exe_path);
     }
+    if (saved_mirrors) |urls| {
+        try Dir.cwd().createDirPath(io, anyzig_appdata);
+        const content = try std.mem.replaceOwned(u8, arena, urls, ",", "\n");
+        try Dir.cwd().writeFile(io, .{ .sub_path = anyzig_appdata ++ "/community-mirrors.txt", .data = content });
+    }
+    if (saved_index) |content| {
+        try Dir.cwd().createDirPath(io, anyzig_appdata);
+        try Dir.cwd().writeFile(io, .{ .sub_path = anyzig_appdata ++ "/download-index.json", .data = content });
+    }
     if (corrupt_entry) |entry| {
         var hashstore = try Dir.cwd().openDir(io, hashstore_path, .{});
         defer hashstore.close(io);
@@ -203,6 +222,7 @@ pub fn main(init: std.process.Init) !u8 {
     }
 
     const argv = all_args[exe_index..];
+    if (mirror) |mode| return runWithMirror(io, arena, argv, env, mode);
     if (kill) {
         if (builtin.os.tag != .windows) std.debug.panic(
             "--kill is only for windows, elsewhere anyzig execs zig so they're the same process",
@@ -305,6 +325,88 @@ pub fn main(init: std.process.Init) !u8 {
         const err = std.process.replace(io, .{ .argv = argv, .environ_map = env });
         std.log.err("exec '{s}' failed with {t}", .{ argv[0], err });
         return 0xff;
+    }
+}
+
+const MirrorMode = enum {
+    /// responds 404 to everything
+    @"not-found",
+    /// serves a valid signature for another file (zig-x86_64-linux-0.14.1.tar.xz) and 404 for archives
+    @"wrong-file",
+    /// serves the signature for zig-x86_64-linux-0.14.1.tar.xz and an archive that doesn't match it
+    @"bad-content",
+};
+
+// https://ziglang.org/download/0.14.1/zig-x86_64-linux-0.14.1.tar.xz.minisig
+const zig_0_14_1_x86_64_linux_signature =
+    "untrusted comment: signature from minisign secret key\n" ++
+    "RUSGOq2NVecA2d2lir8hBZQBgqU4dezcQtz9T8Ss7rWcR7eGXze5FFz26g7rUlAkm2Sa+93+tsH8K5jQl4UaMZLEOLvsCetPsAo=\n" ++
+    "trusted comment: timestamp:1748009016\tfile:zig-x86_64-linux-0.14.1.tar.xz\thashed\n" ++
+    "VZx4p6rTfwd4qPZMPIstinMLfBRB/wLBWqJLGiYFrh+sXWlZ/XLmCVY1Uopb3sIGTDyBn/573CdkvAttWYlADQ==\n";
+
+/// Runs anyzig with ANYZIG_MIRRORS set to two mirrors served by a fake mirror and ziglang.org
+/// unreachable. Forwards anyzig's stderr followed by how many requests the mirror got, and
+/// fails if anyzig leaked memory.
+fn runWithMirror(io: std.Io, arena: std.mem.Allocator, argv: []const []const u8, env: *std.process.Environ.Map, mode: MirrorMode) !u8 {
+    const address: std.Io.net.IpAddress = try .parseIp4("127.0.0.1", 0);
+    var server = try address.listen(io, .{});
+    const port = server.socket.address.getPort();
+    var request_count: std.atomic.Value(u32) = .init(0);
+    (try std.Thread.spawn(.{}, serveMirror, .{ io, &server, mode, &request_count })).detach();
+
+    try env.put("ANYZIG_MIRRORS", try std.fmt.allocPrint(arena, "http://127.0.0.1:{0}/a http://127.0.0.1:{0}/b", .{port}));
+    // the fake mirror is http, only ziglang.org (https) goes to the dead proxy
+    for ([_][]const u8{ "http_proxy", "HTTP_PROXY", "all_proxy", "ALL_PROXY" }) |name| _ = env.swapRemove(name);
+    for ([_][]const u8{ "https_proxy", "HTTPS_PROXY" }) |name| try env.put(name, "http://127.0.0.1:1");
+
+    const stderr_path = "stderr";
+    const exit_code = blk: {
+        const stderr_file = try Dir.cwd().createFile(io, stderr_path, .{});
+        defer stderr_file.close(io);
+        var child = try std.process.spawn(io, .{ .argv = argv, .environ_map = env, .stderr = .{ .file = stderr_file } });
+        break :blk switch (try child.wait(io)) {
+            .exited => |code| code,
+            else => |term| std.debug.panic("anyzig {f}", .{term}),
+        };
+    };
+    const stderr = try Dir.cwd().readFileAlloc(io, stderr_path, arena, .limited(1024 * 1024));
+    try std.Io.File.stderr().writeStreamingAll(io, stderr);
+    try std.Io.File.stderr().writeStreamingAll(io, try std.fmt.allocPrint(
+        arena,
+        "fake mirror served {} requests\n",
+        .{request_count.load(.monotonic)},
+    ));
+    if (std.mem.find(u8, stderr, "leaked") != null) {
+        std.log.err("anyzig leaked memory", .{});
+        return 0xff;
+    }
+    return exit_code;
+}
+
+fn serveMirror(io: std.Io, server: *std.Io.net.Server, mode: MirrorMode, request_count: *std.atomic.Value(u32)) void {
+    while (true) {
+        const stream = server.accept(io) catch |err| std.debug.panic("fake mirror accept failed with {t}", .{err});
+        defer stream.close(io);
+        var recv_buf: [8 * 1024]u8 = undefined;
+        var send_buf: [8 * 1024]u8 = undefined;
+        var reader = stream.reader(io, &recv_buf);
+        var writer = stream.writer(io, &send_buf);
+        var http_server = std.http.Server.init(&reader.interface, &writer.interface);
+        var request = http_server.receiveHead() catch |err| std.debug.panic("fake mirror receive failed with {t}", .{err});
+        _ = request_count.fetchAdd(1, .monotonic);
+        const target = request.head.target;
+        const path = target[0 .. std.mem.findScalar(u8, target, '?') orelse target.len];
+        const is_signature = std.mem.endsWith(u8, path, ".minisig");
+        const content: ?[]const u8 = switch (mode) {
+            .@"not-found" => null,
+            .@"wrong-file" => if (is_signature) zig_0_14_1_x86_64_linux_signature else null,
+            .@"bad-content" => if (is_signature) zig_0_14_1_x86_64_linux_signature else "not the signed archive",
+        };
+        const result = if (content) |c|
+            request.respond(c, .{ .keep_alive = false })
+        else
+            request.respond("", .{ .status = .not_found, .keep_alive = false });
+        result catch |err| std.debug.panic("fake mirror respond failed with {t}", .{err});
     }
 }
 

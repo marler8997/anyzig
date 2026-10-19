@@ -35,6 +35,8 @@ Each version is installed to `APPDATA/zig/VERSION`, where `APPDATA` is:
 
 `zig any list-installed` lists the installed versions and where they are. A version only appears once it's fully installed, so it's safe to run multiple instances of anyzig at once. When several need the same new version, the first one installs it and the others wait for it.
 
+Compilers from ziglang.org are downloaded from the [community mirrors](https://ziglang.org/download/community-mirrors/), tried in a random order, and each download's minisign signature is verified against the ZSF's public key, including that it signs the requested file. If no mirror can provide it, anyzig falls back to ziglang.org. anyzig fetches the mirror list from ziglang.org each time it downloads a compiler and saves it to `APPDATA/community-mirrors.txt`, which it uses when ziglang.org is down. Set `ANYZIG_MIRRORS` to a space-separated list of mirror URLs to use them, in order, instead of the community mirrors.
+
 Older versions of anyzig installed compilers into zig's global cache (i.e. `~/.cache/zig/p/HASH`). When anyzig needs a version that one of those older versions installed, it copies it from there instead of downloading it again. It never modifies or deletes the old copy, since it lives in zig's cache.
 
 # Mach Versions and Download Mirror

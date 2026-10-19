@@ -13,7 +13,6 @@ const Dir = std.Io.Dir;
 const File = std.Io.File;
 
 const zig = @import("zig");
-const minizign = @import("minizign");
 
 const Package = zig.Package;
 
@@ -24,8 +23,11 @@ const Cmdline = @import("Cmdline.zig");
 const TmpFile = @import("TmpFile.zig");
 const lockfile = @import("lockfile.zig");
 const appdata = @import("appdata.zig");
+const minisign = @import("minisign.zig");
 
 pub const std_options: std.Options = .{
+    // debug logs are enabled at runtime with ANYZIG_VERBOSE
+    .log_level = .debug,
     .logFn = logFn,
 };
 
@@ -44,8 +46,8 @@ fn logFn(
     });
 
     switch (level) {
-        .err, .warn => {},
-        .info, .debug => if (!global.verbose) return,
+        .err, .warn, .info => {},
+        .debug => if (!global.verbose) return,
     }
 
     var buffer: [256]u8 = undefined;
@@ -94,6 +96,18 @@ fn initProxies(client: *std.http.Client, arena: Allocator, environ: process.Envi
         if (value) |v| try environ_map.put(name, v);
     }
     try client.initDefaultProxies(arena, &environ_map);
+}
+
+/// Returns null if the variable isn't set or is empty.
+fn getEnv(arena: Allocator, environ: process.Environ, comptime name: []const u8) ?[]const u8 {
+    if (native_os == .windows) {
+        const value_w = environ.getWindows(comptime std.unicode.wtf8ToWtf16LeStringLiteral(name)) orelse return null;
+        if (value_w.len == 0) return null;
+        return std.unicode.wtf16LeToWtf8Alloc(arena, value_w) catch |e| oom(e);
+    }
+    const value = environ.getPosix(name) orelse return null;
+    if (value.len == 0) return null;
+    return value;
 }
 
 fn filePrint(file: File, comptime fmt: []const u8, args: anytype) File.Writer.Error!void {
@@ -215,7 +229,7 @@ fn determineSemanticVersion(scratch: Allocator, build_root: BuildRoot) !Semantic
             );
         }
 
-        log.info(
+        log.debug(
             "{s} '{s}' pulled from '{f}build.zig.zon'",
             .{ key_version, version, build_root.directory },
         );
@@ -238,7 +252,7 @@ fn determineSemanticVersion(scratch: Allocator, build_root: BuildRoot) !Semantic
     // 0.11.0
     // >         .root_source_file = .{ .path = "src/main.zig" },
 
-    // log.info("fallback to default zig version 0.13.0", .{});
+    // log.debug("fallback to default zig version 0.13.0", .{});
     // return "0.13.0";
 }
 
@@ -290,7 +304,7 @@ fn run(init: process.Init.Minimal) !void {
                                 index += 1;
                                 if (index == cmdline.len()) errExit("--build-file requires an argument", .{});
                                 options.build_file = cmdline.arg(index);
-                                log.info("build file '{s}'", .{options.build_file.?});
+                                log.debug("build file '{s}'", .{options.build_file.?});
                             }
                         }
                     }
@@ -336,7 +350,7 @@ fn run(init: process.Init.Minimal) !void {
         break :blk .{ .{ .semantic = try determineSemanticVersion(arena, build_root) }, false };
     };
 
-    log.info("appdata '{s}'", .{app_data});
+    log.debug("appdata '{s}'", .{app_data});
 
     const semantic_version = semantic_version: switch (version_specifier) {
         .semantic => |v| v,
@@ -344,7 +358,10 @@ fn run(init: process.Init.Minimal) !void {
             const download_index_kind: DownloadIndexKind = .official;
             const index_path = try Dir.path.join(arena, &.{ app_data, download_index_kind.basename() });
             defer arena.free(index_path);
-            try fetchFile(arena, init.environ, app_data, download_index_kind.uri(), index_path);
+            fetchFile(arena, init.environ, app_data, download_index_kind.uri(), index_path, .err) catch |err| return switch (err) {
+                error.ReportedFetchFailed, error.ReportedHttpNotFound => error.Reported,
+                error.Reported => |e| e,
+            };
             // since we just downloaded the file, this should always succeed now
             const index_content = try Dir.cwd().readFileAlloc(io, index_path, arena, .unlimited);
             defer arena.free(index_content);
@@ -352,7 +369,7 @@ fn run(init: process.Init.Minimal) !void {
         },
     };
     if (version_specifier == .master) {
-        std.log.info("master is at {f}", .{semantic_version});
+        log.debug("master is at {f}", .{semantic_version});
     }
 
     var versioned_exe_buf: [Dir.max_path_bytes]u8 = undefined;
@@ -365,7 +382,7 @@ fn run(init: process.Init.Minimal) !void {
     const install_path = versioned_exe[0 .. versioned_exe.len - Dir.path.sep_str.len - exe_basename.len];
 
     if (Dir.cwd().access(io, versioned_exe, .{})) |_| {
-        log.info("{s} '{f}' already exists at '{s}'", .{ exe_str, semantic_version, install_path });
+        log.debug("{s} '{f}' already exists at '{s}'", .{ exe_str, semantic_version, install_path });
     } else |err| switch (err) {
         error.FileNotFound => try install(gpa, arena, init.environ, app_data, &semantic_version, install_path),
         else => |e| return pathErr("access", versioned_exe, e),
@@ -411,7 +428,7 @@ fn run(init: process.Init.Minimal) !void {
 
     if (is_init) {
         const build_root = try findBuildRoot(arena, build_root_options) orelse @panic("init did not create a build.zig file");
-        log.info("{f}{s}", .{ build_root.directory, build_root.build_zig_basename });
+        log.debug("{f}{s}", .{ build_root.directory, build_root.build_zig_basename });
         const zon = try loadBuildZigZon(arena, build_root) orelse {
             // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
             // TODO: maybe don't use .name = placeholder?
@@ -678,7 +695,7 @@ fn install(
         const exe_path = std.fmt.bufPrint(&exe_path_buf, "{s}" ++ Dir.path.sep_str ++ exe_basename, .{install_path}) catch
             return reportErr("install path '{s}' is too long", .{install_path});
         if (Dir.cwd().access(io, exe_path, .{})) |_| {
-            log.info("{s} was installed by another process", .{name});
+            log.debug("{s} was installed by another process", .{name});
             return;
         } else |err| switch (err) {
             error.FileNotFound => {},
@@ -696,7 +713,7 @@ fn install(
     try cleanAbandonedInstalls(installing_dir, installing_path, name);
     // we hold the lock, so if this exists it was left by a process that died
     if (installing_dir.access(io, name, .{})) |_| {
-        log.info("deleting abandoned install '{s}{c}{s}'", .{ installing_path, Dir.path.sep, name });
+        log.debug("deleting abandoned install '{s}{c}{s}'", .{ installing_path, Dir.path.sep, name });
         installing_dir.deleteTree(io, name) catch |err| return entryErr("delete", installing_path, name, err);
     } else |err| switch (err) {
         error.FileNotFound => {},
@@ -726,39 +743,26 @@ fn install(
             try copyTree(src, &src_path, dest, &dest_path);
         }
         try moveIntoPlace(prepared_path, install_path);
-        log.info("copied {s} to '{s}'", .{ name, install_path });
+        log.debug("copied {s} to '{s}'", .{ name, install_path });
         return;
     }
 
+    if (build_options.exe == .zig and !isMachVersion(version.*) and determineVersionKind(version.*) == .release)
+        try checkRelease(arena, environ, app_data, version.*);
     const url = try getVersionUrl(arena, environ, app_data, version.*);
     defer url.deinit(arena);
-
-    const fetchinfo: ?FetchInfo = if (!std.mem.startsWith(u8, url.fetch, "https://ziglang.org"))
-        null
-    else fetchinfo: {
-        var mirrors = try MirrorUrls.get(gpa, environ, app_data);
-        defer mirrors.deinit(gpa);
-        if (mirrors.list.items.len == 0) {
-            log.err("no zig mirrors found.", .{});
-            break :fetchinfo null;
-        }
-
-        const zig_archive_filename = url.fetch[std.mem.lastIndexOfScalar(u8, url.fetch, '/').? + 1 ..];
-
-        const download_path = try Dir.path.join(arena, &.{ app_data, "download" });
-        try Dir.cwd().createDirPath(io, download_path);
-        const fi = try mirrors.fetchFromAny(gpa, environ, app_data, download_path, zig_archive_filename);
-        break :fetchinfo fi;
-    };
-    defer {
-        if (fetchinfo) |fi| fi.deinit(gpa);
-    }
-
-    const fetch_target = if (fetchinfo) |fi| fi.archive_path else url.fetch;
-    const hash = try cmdFetch(gpa, arena, environ, prepared_path, fetch_target);
+    // the url always has a '/' after the scheme
+    const archive_name = url.fetch[std.mem.lastIndexOfScalar(u8, url.fetch, '/').? + 1 ..];
+    const archive_path = Dir.path.join(arena, &.{ prepared_path, archive_name }) catch |e| oom(e);
+    defer arena.free(archive_path);
+    // community mirrors only host the archives from ziglang.org
+    const mirrored = std.mem.startsWith(u8, url.fetch, "https://ziglang.org/") and
+        try fetchFromMirrors(arena, environ, app_data, prepared_path, archive_path, archive_name);
+    if (!mirrored) log.info("downloading {s}", .{url.fetch});
+    const hash = try cmdFetch(gpa, arena, environ, prepared_path, if (mirrored) archive_path else url.fetch);
     const fetched_path = try Dir.path.join(arena, &.{ prepared_path, hash.toSlice() });
     try moveIntoPlace(fetched_path, install_path);
-    log.info("downloaded {s} to '{s}'", .{ name, install_path });
+    log.debug("downloaded {s} to '{s}'", .{ name, install_path });
 }
 
 fn cleanAbandonedInstalls(installing_dir: Dir, installing_path: []const u8, skip_name: []const u8) !void {
@@ -774,7 +778,7 @@ fn cleanAbandonedInstalls(installing_dir: Dir, installing_path: []const u8, skip
         // the lock file is created before the directory and never deleted
         const lock_file = installing_dir.openFile(io, lock_name, .{}) catch |err| switch (err) {
             error.FileNotFound => {
-                log.info("deleting install '{s}{c}{s}', it has no lock file", .{ installing_path, Dir.path.sep, entry.name });
+                log.debug("deleting install '{s}{c}{s}', it has no lock file", .{ installing_path, Dir.path.sep, entry.name });
                 installing_dir.deleteTree(io, entry.name) catch |e| return entryErr("delete", installing_path, entry.name, e);
                 continue;
             },
@@ -782,7 +786,7 @@ fn cleanAbandonedInstalls(installing_dir: Dir, installing_path: []const u8, skip
         };
         defer lock_file.close(io);
         if (!(lock_file.tryLock(io, .exclusive) catch |err| return entryErr("lock", installing_path, lock_name, err))) continue;
-        log.info("deleting abandoned install '{s}{c}{s}'", .{ installing_path, Dir.path.sep, entry.name });
+        log.debug("deleting abandoned install '{s}{c}{s}'", .{ installing_path, Dir.path.sep, entry.name });
         installing_dir.deleteTree(io, entry.name) catch |err| return entryErr("delete", installing_path, entry.name, err);
     }
 }
@@ -856,6 +860,72 @@ fn entryKind(dir: Dir, dir_path: []const u8, entry: Dir.Entry) !File.Kind {
     return stat.kind;
 }
 
+/// The server is down, unreachable or misbehaving, so another server could work. Anything else
+/// (i.e. out of memory, out of file descriptors, the local network is down) would fail the same
+/// way on every server.
+const ServerError = error{
+    // DNS
+    UnknownHostName,
+    NameServerFailure,
+    NoAddressReturned,
+    InvalidDnsARecord,
+    InvalidDnsAAAARecord,
+    InvalidDnsCnameRecord,
+    // connecting and the connection
+    ConnectionRefused,
+    ConnectionResetByPeer,
+    ConnectionTimedOut,
+    Timeout,
+    HostUnreachable,
+    NetworkUnreachable,
+    // TLS, std reports a failed handshake (i.e. an invalid certificate) as TlsInitializationFailed
+    TlsInitializationFailed,
+    TlsAlert,
+    TlsBadLength,
+    TlsBadRecordMac,
+    TlsConnectionTruncated,
+    TlsDecodeError,
+    TlsRecordOverflow,
+    TlsUnexpectedMessage,
+    TlsIllegalParameter,
+    TlsSequenceOverflow,
+    // HTTP
+    HttpHeadersInvalid,
+    HttpHeadersOversize,
+    HttpRequestTruncated,
+    HttpConnectionClosing,
+    HttpChunkInvalid,
+    HttpChunkTruncated,
+    HttpContentEncodingUnsupported,
+    TooManyHttpRedirects,
+    HttpRedirectLocationMissing,
+    HttpRedirectLocationOversize,
+    HttpRedirectLocationInvalid,
+};
+comptime {
+    // fails to compile if ServerError has an error std.http.Client can't return, i.e. a typo
+    _ = &struct {
+        fn check(e: ServerError) HttpClientError {
+            return e;
+        }
+    }.check;
+}
+const HttpClientError = std.http.Client.Request.ReceiveHeadError || std.http.Client.Connection.ReadError || std.Io.net.Stream.Writer.Error;
+
+fn netFail(level: std.log.Level, err: anyerror, comptime format: []const u8, args: anytype) error{ ReportedFetchFailed, Reported } {
+    inline for (@typeInfo(ServerError).error_set.error_names.?) |name| {
+        if (err == @field(anyerror, name)) return fetchFail(level, format, args);
+    }
+    return reportErr(format, args);
+}
+
+fn fetchFail(level: std.log.Level, comptime format: []const u8, args: anytype) error{ReportedFetchFailed} {
+    switch (level) {
+        inline else => |l| logFn(l, .default, format, args),
+    }
+    return error.ReportedFetchFailed;
+}
+
 fn reportErr(comptime format: []const u8, args: anytype) error{Reported} {
     log.err(format, args);
     return error.Reported;
@@ -878,14 +948,14 @@ fn findLegacyInstall(arena: Allocator, environ: process.Environ, app_data: [:0]c
         .found => |hash| hash,
     };
     const global_cache_path = appdata.legacyGlobalCacheDir(arena, environ) orelse {
-        log.info("hashstore has {s} but zig's global cache directory is unknown", .{name});
+        log.debug("hashstore has {s} but zig's global cache directory is unknown", .{name});
         return null;
     };
     const path = try Dir.path.join(arena, &.{ global_cache_path, "p", hash.toSlice() });
     const exe_path = try Dir.path.join(arena, &.{ path, exe_basename });
     Dir.cwd().access(io, exe_path, .{}) catch |err| switch (err) {
         error.FileNotFound => {
-            log.info("hashstore has {s} but '{s}' doesn't exist", .{ name, exe_path });
+            log.debug("hashstore has {s} but '{s}' doesn't exist", .{ name, exe_path });
             return null;
         },
         else => |e| return pathErr("access", exe_path, e),
@@ -1175,179 +1245,249 @@ fn makeOfficialUrl(arena: Allocator, semantic_version: SemanticVersion) Download
     };
 }
 
-const FetchInfo = struct {
-    archive_url: []const u8,
+/// Fails if the official download index doesn't have the release (i.e. a typo) rather than
+/// trying to download it. Only fetches the index when the saved one doesn't have it.
+fn checkRelease(arena: Allocator, environ: process.Environ, app_data: [:0]const u8, version: SemanticVersion) error{Reported}!void {
+    const index_path = Dir.path.join(arena, &.{ app_data, DownloadIndexKind.official.basename() }) catch |e| oom(e);
+    defer arena.free(index_path);
+    const saved = indexHasVersion(index_path, version) catch |err| switch (err) {
+        error.FileNotFound => false,
+        error.Reported => |e| return e,
+    };
+    if (saved) {
+        log.debug("zig {f} is in the saved download index", .{version});
+        return;
+    }
+    fetchFile(arena, environ, app_data, DownloadIndexKind.official.uri(), index_path, .warn) catch |err| switch (err) {
+        error.ReportedFetchFailed, error.ReportedHttpNotFound => {
+            log.warn("can't check that zig {f} is a release, trying to download it anyway", .{version});
+            return;
+        },
+        error.Reported => |e| return e,
+    };
+    // fetchFile just wrote it, so it's an error if it's missing now
+    const fetched = indexHasVersion(index_path, version) catch |err| switch (err) {
+        error.FileNotFound => |e| return pathErr("open", index_path, e),
+        error.Reported => |e| return e,
+    };
+    if (!fetched) return reportErr(
+        "zig {f} is not a release, see https://ziglang.org/download/ for the releases",
+        .{version},
+    );
+}
+
+/// Returns error.FileNotFound without reporting it, the caller decides whether it's an error.
+fn indexHasVersion(index_path: []const u8, version: SemanticVersion) error{ FileNotFound, Reported }!bool {
+    const file = Dir.cwd().openFile(io, index_path, .{}) catch |err| switch (err) {
+        error.FileNotFound => |e| return e,
+        else => |e| return pathErr("open", index_path, e),
+    };
+    defer file.close(io);
+    var read_buf: [4096]u8 = undefined;
+    var file_reader = file.reader(io, &read_buf);
+    // the json reader only allocates to track nesting, one bit per level, but its first
+    // allocation is a cache line (up to 128 bytes), this is enough for ~1000 levels
+    var nesting_buf: [256]u8 = undefined;
+    var nesting_allocator: std.heap.FixedBufferAllocator = .init(&nesting_buf);
+    var json_reader: std.json.Reader = .init(nesting_allocator.allocator(), &file_reader.interface);
+    defer json_reader.deinit();
+    const version_array = version.array();
+    return jsonHasTopLevelKey(&json_reader, version_array.slice()) catch |err| switch (err) {
+        error.ReadFailed => pathErr("read", index_path, file_reader.err.?),
+        error.OutOfMemory => reportErr("download index '{s}' is invalid, it's nested too deeply", .{index_path}),
+        else => reportErr("download index '{s}' is invalid JSON ({t})", .{ index_path, err }),
+    };
+}
+
+/// Returns whether the top-level JSON object has `key`, skipping the values rather than
+/// parsing them. Fails with SyntaxError if the top-level value isn't an object.
+fn jsonHasTopLevelKey(json_reader: *std.json.Reader, key: []const u8) std.json.Reader.SkipError!bool {
+    if (try json_reader.next() != .object_begin) return error.SyntaxError;
+    while (try nextKeyEquals(json_reader, key)) |equal| {
+        if (equal) return true;
+        try json_reader.skipValue();
+    }
+    return false;
+}
+
+/// Reads the next key of an object and returns whether it's `key`, or null at the end of
+/// the object. A key with escapes comes in pieces, the last one is a .string.
+fn nextKeyEquals(json_reader: *std.json.Reader, key: []const u8) std.json.Reader.NextError!?bool {
+    var rest: ?[]const u8 = key; // null once it doesn't match
+    while (true) {
+        const token = try json_reader.next();
+        const piece: []const u8 = switch (token) {
+            .object_end => return null,
+            .partial_string, .string => |p| p,
+            .partial_string_escaped_1 => |*p| p,
+            .partial_string_escaped_2 => |*p| p,
+            .partial_string_escaped_3 => |*p| p,
+            .partial_string_escaped_4 => |*p| p,
+            // the scanner reports a non-string key as a SyntaxError, so this would be a
+            // bug in std, but it's from a file so it isn't worth crashing over
+            else => return error.SyntaxError,
+        };
+        if (rest) |r| rest = if (std.mem.startsWith(u8, r, piece)) r[piece.len..] else null;
+        if (token == .string) return if (rest) |r| r.len == 0 else false;
+    }
+}
+
+/// Downloads the archive from the community mirrors to `archive_path` (in `dir_path`) and
+/// verifies its signature. Returns false if no mirror could provide it. See https://ziglang.org/download/community-mirrors/
+fn fetchFromMirrors(
+    arena: Allocator,
+    environ: process.Environ,
+    app_data: [:0]const u8,
+    dir_path: []const u8,
     archive_path: []const u8,
-    minisign_url: []const u8,
-    minisign_path: []const u8,
-    const anyzig_mirror_url_query = "source=anyzig/" ++ @embedFile("version");
+    archive_name: []const u8,
+) error{Reported}!bool {
+    const mirrors = try loadMirrors(arena, environ, app_data);
+    if (mirrors.len == 0) return false;
 
-    fn init(gpa: Allocator, tmpdir: []const u8, mirror_url: []const u8, filename: []const u8) !@This() {
-        const archive_url = try std.fmt.allocPrint(gpa, "{s}{s}{s}?{s}", .{
-            mirror_url,
-            if (std.mem.endsWith(u8, mirror_url, "/")) "" else "/",
-            filename,
-            anyzig_mirror_url_query,
-        });
-        errdefer gpa.free(archive_url);
-        const minisign_url = try std.fmt.allocPrint(gpa, "{s}{s}{s}.minisig?{s}", .{
-            mirror_url,
-            if (std.mem.endsWith(u8, mirror_url, "/")) "" else "/",
-            filename,
-            anyzig_mirror_url_query,
-        });
-        errdefer gpa.free(minisign_url);
+    Dir.cwd().createDirPath(io, dir_path) catch |err| return pathErr("create directory", dir_path, err);
+    const sig_path = std.mem.concat(arena, u8, &.{ archive_path, ".minisig" }) catch |e| oom(e);
+    defer arena.free(sig_path);
+    const key = comptime minisign.PublicKey.decode(zsf_public_key) catch unreachable;
 
-        const minisig_filename = try std.fmt.allocPrint(gpa, "{s}{s}", .{ filename, ".minisig" });
-        defer gpa.free(minisig_filename);
-
-        const minisign_path = try Dir.path.join(gpa, &.{
-            tmpdir,
-            minisig_filename,
-        });
-        return .{
-            .archive_url = archive_url,
-            .minisign_url = minisign_url,
-            .minisign_path = minisign_path,
-            .archive_path = minisign_path[0 .. minisign_path.len - ".minisig".len],
+    for (mirrors) |mirror| {
+        log.info("downloading {s} from {s}", .{ archive_name, mirror });
+        // the signature is small, check it before downloading the archive
+        const sig_url = std.fmt.allocPrint(arena, "{s}/{s}.minisig?" ++ mirror_source_query, .{ mirror, archive_name }) catch |e| oom(e);
+        defer arena.free(sig_url);
+        // loadMirrors only returns URLs that parse without a query or fragment
+        fetchFile(arena, environ, app_data, std.Uri.parse(sig_url) catch unreachable, sig_path, .warn) catch |err| switch (err) {
+            error.ReportedFetchFailed => continue,
+            // mirrors get files from ziglang.org when they're first requested, so it likely
+            // doesn't exist, ziglang.org has the final say rather than every other mirror
+            error.ReportedHttpNotFound => {
+                log.warn("mirror '{s}' doesn't have '{s}', trying ziglang.org instead of the other mirrors", .{ mirror, archive_name });
+                return false;
+            },
+            error.Reported => |e| return e,
         };
+        // the ZSF's signatures are ~300 bytes
+        var sig_buf: [4096]u8 = undefined;
+        const sig_text = Dir.cwd().readFile(io, sig_path, &sig_buf) catch |err| return pathErr("read", sig_path, err);
+        if (sig_text.len == sig_buf.len) {
+            log.err("mirror '{s}' served an invalid signature for '{s}', it's too big", .{ mirror, archive_name });
+            continue;
+        }
+        const sig = minisign.Signature.parse(sig_text) catch |err| {
+            log.err("mirror '{s}' served an invalid signature for '{s}' ({t})", .{ mirror, archive_name, err });
+            continue;
+        };
+        sig.verifyTrustedComment(key) catch {
+            log.err("mirror '{s}' served a signature for '{s}' that isn't from the ZSF", .{ mirror, archive_name });
+            continue;
+        };
+        // prevents a mirror from serving another signed archive, i.e. an older version
+        const signed_name = sig.trustedFile() orelse {
+            log.err("mirror '{s}' served a signature for '{s}' that doesn't say which file it's for", .{ mirror, archive_name });
+            continue;
+        };
+        if (!std.mem.eql(u8, signed_name, archive_name)) {
+            log.err("mirror '{s}' served the signature for '{s}' instead of '{s}'", .{ mirror, signed_name, archive_name });
+            continue;
+        }
+
+        const archive_url = std.fmt.allocPrint(arena, "{s}/{s}?" ++ mirror_source_query, .{ mirror, archive_name }) catch |e| oom(e);
+        defer arena.free(archive_url);
+        fetchFile(arena, environ, app_data, std.Uri.parse(archive_url) catch unreachable, archive_path, .warn) catch |err| switch (err) {
+            // the signature exists so the archive does too, the mirror is broken
+            error.ReportedFetchFailed, error.ReportedHttpNotFound => continue,
+            error.Reported => |e| return e,
+        };
+        const hash = try hashFile(archive_path);
+        sig.verifyHash(key, &hash) catch {
+            log.err("mirror '{s}' served '{s}' with an invalid signature", .{ mirror, archive_name });
+            continue;
+        };
+        return true;
+    }
+    log.warn("no mirror could provide '{s}', falling back to ziglang.org", .{archive_name});
+    return false;
+}
+
+/// from https://ziglang.org/download/
+const zsf_public_key = "RWSGOq2NVecA2UPNdBUZykf1CCb147pkmdtYxgb3Ti+JO/wCYvhbAb/U";
+const mirror_source_query = "source=anyzig/" ++ @embedFile("version");
+const mirror_list_url = "https://ziglang.org/download/community-mirrors.txt";
+
+const mirrors_env = "ANYZIG_MIRRORS";
+
+/// Returns the mirrors from ANYZIG_MIRRORS in order, or the community mirrors in a random
+/// order. The community list is saved in app_data so the mirrors can still be used when
+/// ziglang.org is down.
+fn loadMirrors(arena: Allocator, environ: process.Environ, app_data: [:0]const u8) error{Reported}![]const []const u8 {
+    if (getEnv(arena, environ, mirrors_env)) |value| {
+        var mirrors: std.ArrayList([]const u8) = .empty;
+        var it = std.mem.tokenizeAny(u8, value, " \t\r\n");
+        while (it.next()) |url| {
+            // http is allowed, every download's signature is verified
+            const http = std.mem.startsWith(u8, url, "https://") or std.mem.startsWith(u8, url, "http://");
+            if (!http or !isMirrorUrl(url)) return reportErr(
+                mirrors_env ++ " has '{s}' which isn't an http or https URL without a query or fragment",
+                .{url},
+            );
+            mirrors.append(arena, std.mem.trimEnd(u8, url, "/")) catch |e| oom(e);
+        }
+        if (mirrors.items.len == 0) return reportErr(mirrors_env ++ " is set but has no URLs", .{});
+        return mirrors.items;
     }
 
-    fn deinit(self: @This(), gpa: Allocator) void {
-        Dir.cwd().deleteFile(io, self.archive_path) catch |err| switch (err) {
-            error.FileNotFound => {},
-            else => |e| log.err("remove '{s}' failed with {t}", .{ self.archive_path, e }),
-        };
-        Dir.cwd().deleteFile(io, self.minisign_path) catch |err| switch (err) {
-            error.FileNotFound => {},
-            else => |e| log.err("remove '{s}' failed with {t}", .{ self.minisign_path, e }),
-        };
-        gpa.free(self.archive_url);
-        gpa.free(self.minisign_url);
-        gpa.free(self.minisign_path);
-        // do not free archive_path here, since its a slice of minisign_path
-    }
-
-    fn fetchAndValidate(self: @This(), gpa: Allocator, environ: process.Environ, app_data: [:0]const u8) !void {
-        var arena = std.heap.ArenaAllocator.init(gpa);
-        defer arena.deinit();
-
-        fetchFile(
-            arena.allocator(),
-            environ,
-            app_data,
-            try std.Uri.parse(self.archive_url),
-            self.archive_path,
-        ) catch |err| {
-            log.err("failed to download archive: {t} {s}", .{ err, self.archive_url });
-            return err;
-        };
-        fetchFile(
-            arena.allocator(),
-            environ,
-            app_data,
-            try std.Uri.parse(self.minisign_url),
-            self.minisign_path,
-        ) catch |err| {
-            log.err("failed to download signature: {t} {s}", .{ err, self.minisign_url });
-            return err;
-        };
-
-        self.validateMinisign(gpa) catch |err| {
-            log.err("failed to validate: {t} {s}", .{ err, self.archive_url });
-            return err;
-        };
-    }
-
-    const zig_org_minisign_pubkey = minizign.PublicKey.decodeFromBase64("RWSGOq2NVecA2UPNdBUZykf1CCb147pkmdtYxgb3Ti+JO/wCYvhbAb/U") catch unreachable;
-
-    fn validateMinisign(self: @This(), gpa: Allocator) !void {
-        const sig_bytes = try Dir.cwd().readFileAlloc(io, self.minisign_path, gpa, .unlimited);
-        defer gpa.free(sig_bytes);
-
-        const archive_file = try Dir.cwd().openFile(io, self.archive_path, .{});
-        defer archive_file.close(io);
-
-        var sig = try minizign.Signature.decode(gpa, sig_bytes);
-        defer sig.deinit();
-
-        try zig_org_minisign_pubkey.verifyFile(
-            gpa,
-            io,
-            archive_file,
-            sig,
-            null,
-        );
-    }
-};
-
-pub const MirrorUrls = struct {
-    list: std.ArrayListUnmanaged([]const u8) = .empty,
-    const mirrorlist = struct {
-        const url = "https://ziglang.org/download/community-mirrors.txt";
-        const uri = std.Uri.parse(url) catch unreachable;
+    const path = Dir.path.join(arena, &.{ app_data, "community-mirrors.txt" }) catch |e| oom(e);
+    defer arena.free(path);
+    fetchFile(arena, environ, app_data, std.Uri.parse(mirror_list_url) catch unreachable, path, .warn) catch |err| switch (err) {
+        error.ReportedFetchFailed, error.ReportedHttpNotFound => {},
+        error.Reported => |e| return e,
+    };
+    const content = Dir.cwd().readFileAlloc(io, path, arena, .limited(1024 * 1024)) catch |err| switch (err) {
+        error.FileNotFound => return &.{},
+        error.OutOfMemory => |e| oom(e),
+        else => |e| return pathErr("read", path, e),
     };
 
-    fn get(
-        gpa: Allocator,
-        environ: process.Environ,
-        app_data: [:0]const u8,
-    ) !@This() {
-        const mirrorlist_path = try Dir.path.join(gpa, &.{ app_data, "community-mirrors.txt" });
-        defer gpa.free(mirrorlist_path);
-        var self: @This() = .{};
+    var mirrors: std.ArrayList([]const u8) = .empty;
+    var lines = std.mem.tokenizeAny(u8, content, "\r\n");
+    while (lines.next()) |line| {
+        // the ZSF requires mirrors to support https
+        if (!std.mem.startsWith(u8, line, "https://") or !isMirrorUrl(line)) {
+            log.warn("ignoring '{s}' in '{s}', it isn't an https URL without a query or fragment", .{ line, path });
+            continue;
+        }
+        mirrors.append(arena, std.mem.trimEnd(u8, line, "/")) catch |e| oom(e);
+    }
+    // spreads the load across mirrors
+    const random_source: std.Random.IoSource = .{ .io = io };
+    random_source.interface().shuffle([]const u8, mirrors.items);
+    return mirrors.items;
+}
 
-        var arena = std.heap.ArenaAllocator.init(gpa);
-        defer arena.deinit();
-        fetchFile(arena.allocator(), environ, app_data, mirrorlist.uri, mirrorlist_path) catch {
-            log.err("failed to fetch mirrorlist to: {s}", .{mirrorlist_path});
+/// File URLs are made by appending to the mirror URL, so it can't have a query or fragment.
+fn isMirrorUrl(url: []const u8) bool {
+    const uri = std.Uri.parse(url) catch return false;
+    return uri.host != null and uri.query == null and uri.fragment == null;
+}
+
+fn hashFile(path: []const u8) error{Reported}![minisign.Hasher.digest_length]u8 {
+    const file = Dir.cwd().openFile(io, path, .{}) catch |err| return pathErr("open", path, err);
+    defer file.close(io);
+    var hasher: minisign.Hasher = .init(.{});
+    var buf: [64 * 1024]u8 = undefined;
+    var reader = file.reader(io, &buf);
+    while (true) {
+        const data = reader.interface.peekGreedy(1) catch |err| switch (err) {
+            error.EndOfStream => break,
+            error.ReadFailed => return pathErr("read", path, reader.err.?),
         };
-
-        const mirrors_content = Dir.cwd().readFileAlloc(io, mirrorlist_path, gpa, .unlimited) catch |err| switch (err) {
-            error.FileNotFound => return self,
-            else => |e| return pathErr("read", mirrorlist_path, e),
-        };
-        defer gpa.free(mirrors_content);
-
-        var iter = std.mem.splitScalar(u8, mirrors_content, '\n');
-        while (iter.next()) |mirror| {
-            const mirror_without_whitespace = std.mem.trim(u8, mirror, &std.ascii.whitespace);
-            if (mirror_without_whitespace.len > 0) {
-                try self.list.append(gpa, try gpa.dupe(u8, mirror_without_whitespace));
-            }
-        }
-        const io_src: std.Random.IoSource = .{ .io = io };
-        io_src.interface().shuffle([]const u8, self.list.items);
-        return self;
+        hasher.update(data);
+        reader.interface.toss(data.len);
     }
-
-    fn fetchFromAny(
-        self: @This(),
-        gpa: Allocator,
-        environ: process.Environ,
-        app_data: [:0]const u8,
-        tmpdir: []const u8,
-        filename: []const u8,
-    ) !FetchInfo {
-        for (self.list.items) |mirror_url| {
-            const fetchinfo = try FetchInfo.init(gpa, tmpdir, mirror_url, filename);
-            fetchinfo.fetchAndValidate(gpa, environ, app_data) catch {
-                fetchinfo.deinit(gpa);
-                continue;
-            };
-            return fetchinfo;
-        }
-        log.err("ran out of mirrors for: {s}", .{filename});
-        return error.NoMoreMirrors;
-    }
-
-    fn deinit(self: *@This(), gpa: Allocator) void {
-        for (self.list.items) |mirror| {
-            gpa.free(mirror);
-        }
-        self.list.deinit(gpa);
-    }
-};
+    var hash: [minisign.Hasher.digest_length]u8 = undefined;
+    hasher.final(&hash);
+    return hash;
+}
 
 fn getVersionUrl(
     arena: Allocator,
@@ -1383,7 +1523,10 @@ fn getVersionUrl(
             return url;
     }
 
-    try fetchFile(arena, environ, app_data, download_index_kind.uri(), index_path);
+    fetchFile(arena, environ, app_data, download_index_kind.uri(), index_path, .err) catch |err| return switch (err) {
+        error.ReportedFetchFailed, error.ReportedHttpNotFound => error.Reported,
+        error.Reported => |e| e,
+    };
     // since we just downloaded the file, this should always succeed now
     const index_content = try Dir.cwd().readFileAlloc(io, index_path, arena, .unlimited);
     defer arena.free(index_content);
@@ -1450,19 +1593,23 @@ fn extractUrlFromMachDownloadIndex(
     };
 }
 
+/// Server failures (see ServerError) are logged at `fail_level` and return error.ReportedFetchFailed so
+/// the caller can try another server, or error.ReportedHttpNotFound for a 404. Any other failure is
+/// reported as an error.
 fn fetchFile(
     scratch: Allocator,
     environ: process.Environ,
     app_data: [:0]const u8,
     uri: std.Uri,
     out_filepath: []const u8,
-) !void {
-    log.info("fetch '{f}' to '{s}'", .{ uri, out_filepath });
+    fail_level: std.log.Level,
+) error{ Reported, ReportedFetchFailed, ReportedHttpNotFound }!void {
+    log.debug("fetch '{f}' to '{s}'", .{ uri, out_filepath });
     const root = global.getRootProgressNode();
 
     const progress_node_name = std.fmt.allocPrint(scratch, "fetch {f}", .{uri}) catch |e| oom(e);
     defer scratch.free(progress_node_name);
-    const node = root.start(progress_node_name, 0);
+    const node = root.start(progress_node_name, 1);
     defer node.end();
 
     var client: std.http.Client = .{ .allocator = scratch, .io = io };
@@ -1477,37 +1624,42 @@ fn fetchFile(
     // each download the file and the last rename wins.
     const tmp_path = Dir.path.join(scratch, &.{ app_data, "tmp" }) catch |e| oom(e);
     defer scratch.free(tmp_path);
-    var tmp_file = try TmpFile.create(io, tmp_path);
+    var tmp_file = TmpFile.create(io, tmp_path) catch |err| return pathErr("create a temporary file in", tmp_path, err);
     defer tmp_file.deinit(io);
 
     var req = client.request(.GET, uri, .{
         .keep_alive = false,
         .headers = .{ .accept_encoding = .{ .override = "identity" } },
-    }) catch |err| return reportErr("fetch '{f}' failed with {t}", .{ uri, err });
+    }) catch |err| return netFail(fail_level, err, "fetch '{f}' failed with {t}", .{ uri, err });
     defer req.deinit();
     req.sendBodiless() catch |err| switch (err) {
-        error.WriteFailed => return reportErr(
-            "fetch '{f}': sending the request failed with {t}",
-            .{ uri, req.connection.?.stream_writer.err orelse err },
-        ),
+        error.WriteFailed => {
+            const write_err = req.connection.?.stream_writer.err orelse err;
+            return netFail(fail_level, write_err, "fetch '{f}': sending the request failed with {t}", .{ uri, write_err });
+        },
     };
     var redirect_buf: [8 * 1024]u8 = undefined;
     var response = req.receiveHead(&redirect_buf) catch |err| switch (err) {
-        error.WriteFailed => return reportErr(
-            "fetch '{f}': sending the request failed with {t}",
-            .{ uri, req.connection.?.stream_writer.err orelse err },
-        ),
-        error.ReadFailed => return reportErr(
-            "fetch '{f}': receiving the response failed with {t}",
-            .{ uri, req.connection.?.getReadError() orelse err },
-        ),
-        else => |e| return reportErr("fetch '{f}' failed with {t}", .{ uri, e }),
+        error.WriteFailed => {
+            const write_err = req.connection.?.stream_writer.err orelse err;
+            return netFail(fail_level, write_err, "fetch '{f}': sending the request failed with {t}", .{ uri, write_err });
+        },
+        error.ReadFailed => {
+            const read_err = req.connection.?.getReadError() orelse err;
+            return netFail(fail_level, read_err, "fetch '{f}': receiving the response failed with {t}", .{ uri, read_err });
+        },
+        else => |e| return netFail(fail_level, e, "fetch '{f}' failed with {t}", .{ uri, e }),
     };
-    if (response.head.status != .ok) return reportErr(
-        "fetch '{f}': HTTP response {} \"{s}\"",
-        .{ uri, @backingInt(response.head.status), response.head.status.phrase() orelse "" },
-    );
-    if (response.head.content_encoding != .identity) return reportErr(
+    if (response.head.status != .ok) {
+        const err = fetchFail(
+            fail_level,
+            "fetch '{f}': HTTP response {} \"{s}\"",
+            .{ uri, @backingInt(response.head.status), response.head.status.phrase() orelse "" },
+        );
+        return if (response.head.status == .not_found) error.ReportedHttpNotFound else err;
+    }
+    if (response.head.content_encoding != .identity) return fetchFail(
+        fail_level,
         "fetch '{f}': server sent {t} content, expected identity",
         .{ uri, response.head.content_encoding },
     );
@@ -1520,17 +1672,18 @@ fn fetchFile(
     const received = response.reader(&transfer_buf).streamRemaining(&file_writer.interface) catch |err| switch (err) {
         error.ReadFailed => {
             const read_err: anyerror = if (response.bodyErr()) |e| e else req.connection.?.getReadError() orelse err;
-            return reportErr("fetch '{f}': receiving the response failed with {t}", .{ uri, read_err });
+            return netFail(fail_level, read_err, "fetch '{f}': receiving the response failed with {t}", .{ uri, read_err });
         },
         error.WriteFailed => return entryErr("write", tmp_path, &tmp_file.name, file_writer.err.?),
     };
-    if (content_length) |expected| if (received != expected) return reportErr(
+    if (content_length) |expected| if (received != expected) return fetchFail(
+        fail_level,
         "fetch '{f}': received {} of {} bytes",
         .{ uri, received, expected },
     );
     file_writer.interface.flush() catch return entryErr("write", tmp_path, &tmp_file.name, file_writer.err.?);
 
-    try tmp_file.finish(io, out_filepath);
+    tmp_file.finish(io, out_filepath) catch |err| return pathErr("replace", out_filepath, err);
 }
 
 /// Fetch's "global cache" is dir_path (only used for zip temp files), not zig's. Recompressing
@@ -1604,7 +1757,7 @@ fn cmdFetch(
     };
     defer fetch.deinit();
 
-    log.info("cacheing '{s}'...", .{url});
+    log.debug("fetching '{s}'...", .{url});
     const failed = if (fetch.run()) false else |err| switch (err) {
         error.OutOfMemory => errExit("out of memory", .{}),
         error.Canceled => unreachable, // we never cancel
@@ -1615,6 +1768,7 @@ fn cmdFetch(
 
     if (fetch.error_bundle.root_list.items.len > 0) {
         var errors = try fetch.error_bundle.toOwnedBundle("");
+        defer errors.deinit(gpa);
         try errors.renderToStderr(io, .{}, color);
         return error.Reported;
     }
