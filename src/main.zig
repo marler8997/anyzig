@@ -332,22 +332,31 @@ fn run(init: process.Init.Minimal) !void {
                 };
 
                 if (manual_version) |version| break :blk .{ version, !is_help };
-                try filePrint(.stderr(), "error: anyzig init requires a version, i.e. 'zig 0.13.0 {s}'\n", .{command});
+                if (try readAdHocVersion(app_data)) |version| break :blk .{ .{ .semantic = version }, !is_help };
+                try filePrint(
+                    .stderr(),
+                    "error: anyzig init requires a version, you can:\n" ++
+                        "  1. run 'zig 0.13.0 {s}'\n" ++
+                        "  2. set a version to use outside projects with 'zig any set-ad-hoc-version VERSION'\n",
+                    .{command},
+                );
                 std.process.exit(0xff);
             }
-            if (std.mem.eql(u8, command, "any")) std.process.exit(try anyCommand(cmdline, cmdline_offset + 1, app_data));
+            if (std.mem.eql(u8, command, "any")) std.process.exit(try anyCommand(cmdline, cmdline_offset + 1, init.environ, app_data));
         }
         if (manual_version) |version| break :blk .{ version, false };
-        const build_root = try findBuildRoot(arena, build_root_options) orelse {
-            try File.stderr().writeStreamingAll(
-                io,
-                "no build.zig to pull a zig version from, you can:\n" ++
-                    "  1. run '" ++ exe_str ++ " VERSION' to specify a version\n" ++
-                    "  2. run from a directory where a build.zig can be found\n",
-            );
-            std.process.exit(0xff);
-        };
-        break :blk .{ .{ .semantic = try determineSemanticVersion(arena, build_root) }, false };
+        // a project must say which version it uses, the ad-hoc version is only for outside them
+        if (try findBuildRoot(arena, build_root_options)) |build_root|
+            break :blk .{ .{ .semantic = try determineSemanticVersion(arena, build_root) }, false };
+        if (try readAdHocVersion(app_data)) |version| break :blk .{ .{ .semantic = version }, false };
+        try File.stderr().writeStreamingAll(
+            io,
+            "no build.zig to pull a zig version from, you can:\n" ++
+                "  1. run '" ++ exe_str ++ " VERSION' to specify a version\n" ++
+                "  2. run from a directory where a build.zig can be found\n" ++
+                "  3. set a version to use outside projects with 'zig any set-ad-hoc-version VERSION'\n",
+        );
+        std.process.exit(0xff);
     };
 
     log.debug("appdata '{s}'", .{app_data});
@@ -968,15 +977,17 @@ fn anyCommandUsage() !u8 {
         .stderr(),
         "any" ++ @tagName(build_options.exe) ++ " {s} from https://github.com/marler8997/anyzig\n" ++
             "Here are the anyzig-specific subcommands:\n" ++
-            "  zig any version                | print the version of anyzig to stdout\n" ++
-            "  zig any list-installed         | list all versions of zig installed by anyzig\n" ++
+            "  zig any version                      | print the version of anyzig to stdout\n" ++
+            "  zig any list-installed               | list all versions of zig installed by anyzig\n" ++
+            "  zig any set-ad-hoc-version [VERSION] | set the zig version to use outside projects,\n" ++
+            "                                       | omit VERSION to clear it\n" ++
             "Set " ++ verbose_env ++ "=1 to log what anyzig is doing.\n",
         .{@embedFile("version")},
     );
     return 0xff;
 }
 
-fn anyCommand(cmdline: Cmdline, cmdline_offset: usize, app_data: [:0]const u8) !u8 {
+fn anyCommand(cmdline: Cmdline, cmdline_offset: usize, environ: process.Environ, app_data: [:0]const u8) !u8 {
     if (cmdline_offset == cmdline.len()) {
         std.process.exit(try anyCommandUsage());
     }
@@ -989,11 +1000,96 @@ fn anyCommand(cmdline: Cmdline, cmdline_offset: usize, app_data: [:0]const u8) !
         return 0;
     } else if (std.mem.eql(u8, command, "set-verbosity")) {
         errExit("'set-verbosity' was removed, set " ++ verbose_env ++ "=1 to log what anyzig is doing", .{});
+    } else if (std.mem.eql(u8, command, "set-ad-hoc-version")) {
+        if (arg_offset == cmdline.len()) {
+            try clearAdHocVersion(app_data);
+            return 0;
+        }
+        if (arg_offset + 1 < cmdline.len()) errExit("the 'set-ad-hoc-version' subcommand takes at most one VERSION", .{});
+        const version_str = cmdline.arg(arg_offset);
+        // master would fetch the download index every time zig runs
+        const version = SemanticVersion.parse(version_str) orelse errExit(
+            "invalid VERSION '{s}', expected a zig version like 0.15.2 (not master)",
+            .{version_str},
+        );
+        if (!isMachVersion(version) and determineVersionKind(version) == .release)
+            try checkRelease(global.arena, environ, app_data, version);
+        try writeAdHocVersion(app_data, version_str);
+        log.info("zig {f} will be used outside projects", .{version});
+        return 0;
     } else if (std.mem.eql(u8, command, "list-installed")) {
         if (arg_offset < cmdline.len()) errExit("the 'list-installed' subcommand does not take any cmdline args", .{});
         try listInstalled(app_data);
         return 0;
     } else errExit("unknown zig any '{s}' command", .{command});
+}
+
+const ad_hoc_version_basename = "ad-hoc-version";
+
+/// Returns the version set by 'zig any set-ad-hoc-version', or null if it isn't set.
+fn readAdHocVersion(app_data: [:0]const u8) error{Reported}!?SemanticVersion {
+    var path_buf: [Dir.max_path_bytes]u8 = undefined;
+    const path = try adHocVersionPath(&path_buf, app_data);
+    var content_buf: [SemanticVersion.max_string + 2]u8 = undefined;
+    const content = Dir.cwd().readFile(io, path, &content_buf) catch |err| switch (err) {
+        error.FileNotFound => return null,
+        else => |e| return pathErr("read", path, e),
+    };
+    const fix = "run 'zig any set-ad-hoc-version VERSION' to replace it";
+    if (content.len == content_buf.len) return reportErr("'{s}' is too big to be a version, " ++ fix, .{path});
+    const trimmed = std.mem.trim(u8, content, &std.ascii.whitespace);
+    const version = SemanticVersion.parse(trimmed) orelse
+        return reportErr("'{s}' has '{s}' which isn't a zig version, " ++ fix, .{ path, trimmed });
+    log.debug("ad-hoc version {f} from '{s}'", .{ version, path });
+    return version;
+}
+
+fn adHocVersionPath(buf: *[Dir.max_path_bytes]u8, app_data: [:0]const u8) error{Reported}![]const u8 {
+    return std.fmt.bufPrint(buf, "{s}" ++ Dir.path.sep_str ++ ad_hoc_version_basename, .{app_data}) catch
+        reportErr("ad-hoc version path in '{s}' is too long", .{app_data});
+}
+
+/// Deletes the ad-hoc version and logs what it was. Doesn't parse the file so an invalid one
+/// can be cleared too.
+fn clearAdHocVersion(app_data: [:0]const u8) error{Reported}!void {
+    var path_buf: [Dir.max_path_bytes]u8 = undefined;
+    const path = try adHocVersionPath(&path_buf, app_data);
+    var content_buf: [SemanticVersion.max_string + 2]u8 = undefined;
+    const content = Dir.cwd().readFile(io, path, &content_buf) catch |err| switch (err) {
+        error.FileNotFound => {
+            log.info("no ad-hoc version is set", .{});
+            return;
+        },
+        else => |e| return pathErr("read", path, e),
+    };
+    Dir.cwd().deleteFile(io, path) catch |err| switch (err) {
+        // another process cleared it
+        error.FileNotFound => {},
+        else => |e| return pathErr("delete", path, e),
+    };
+    const old = std.mem.trim(u8, content, &std.ascii.whitespace);
+    if (content.len == content_buf.len)
+        log.info("cleared the ad-hoc version (was '{s}...')", .{old})
+    else
+        log.info("cleared the ad-hoc version (was '{s}')", .{old});
+}
+
+fn writeAdHocVersion(app_data: [:0]const u8, version_str: []const u8) error{Reported}!void {
+    const arena = global.arena;
+    const tmp_path = Dir.path.join(arena, &.{ app_data, "tmp" }) catch |e| oom(e);
+    defer arena.free(tmp_path);
+    const path = Dir.path.join(arena, &.{ app_data, ad_hoc_version_basename }) catch |e| oom(e);
+    defer arena.free(path);
+    // written to a temporary file and renamed so a zig running at the same time never
+    // reads half of it
+    var tmp_file = TmpFile.create(io, tmp_path) catch |err| return pathErr("create a temporary file in", tmp_path, err);
+    defer tmp_file.deinit(io);
+    var buf: [SemanticVersion.max_string + 1]u8 = undefined;
+    var file_writer = tmp_file.file.writer(io, &buf);
+    file_writer.interface.print("{s}\n", .{version_str}) catch
+        return entryErr("write", tmp_path, &tmp_file.name, file_writer.err.?);
+    file_writer.interface.flush() catch return entryErr("write", tmp_path, &tmp_file.name, file_writer.err.?);
+    tmp_file.finish(io, path) catch |err| return pathErr("replace", path, err);
 }
 
 fn listInstalled(app_data: [:0]const u8) !void {
@@ -1082,23 +1178,18 @@ const SemanticVersion = struct {
     }
 
     pub fn parse(s: []const u8) ?SemanticVersion {
+        // longer than any zig version, the callers report it as an invalid version
+        if (s.len > max_string) return null;
         const parsed = std.SemanticVersion.parse(s) catch |e| switch (e) {
             error.Overflow, error.InvalidVersion => return null,
         };
-        std.debug.assert(s.len <= max_string);
 
         const result: SemanticVersion = .{
             .major = parsed.major,
             .minor = parsed.minor,
             .patch = parsed.patch,
-            .pre = if (parsed.pre) |pre| BoundedString(max_pre).init(pre) orelse std.debug.panic(
-                "semantic version pre '{s}' is too long (max is {})",
-                .{ pre, max_pre },
-            ) else null,
-            .build = if (parsed.build) |build| BoundedString(max_build).init(build) orelse std.debug.panic(
-                "semantic version build '{s}' is too long (max is {})",
-                .{ build, max_build },
-            ) else null,
+            .pre = if (parsed.pre) |pre| BoundedString(max_pre).init(pre) orelse return null else null,
+            .build = if (parsed.build) |build| BoundedString(max_build).init(build) orelse return null else null,
         };
 
         {

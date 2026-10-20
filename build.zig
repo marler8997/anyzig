@@ -210,31 +210,6 @@ fn addTests(
         test_step.dependOn(&run.step);
     }
 
-    {
-        const run = b.addRunArtifact(anyzig);
-        run.setName("anyzig init (no version)");
-        run.addArg("init");
-        run.expectStdErrEqual("error: anyzig init requires a version, i.e. 'zig 0.13.0 init'\n");
-        test_step.dependOn(&run.step);
-    }
-
-    {
-        const run = b.addRunArtifact(anyzig);
-        run.setName("anyzig with no build.zig file");
-        run.addArg("version");
-        // the most full-proof directory to avoid finding a build.zig...if
-        // this doesn't work, then no directory would work anyway
-        run.setCwd(.{ .cwd_relative = switch (builtin.os.tag) {
-            .windows => "C:/",
-            else => "/",
-        } });
-        run.addCheck(.{
-            .expect_stderr_match = "no build.zig to pull a zig version from, you can:",
-        });
-        run.expectExitCode(0xff);
-        test_step.dependOn(&run.step);
-    }
-
     const test_factory: TestFactory = .{
         .b = b,
         .test_step = test_step,
@@ -249,6 +224,35 @@ fn addTests(
         .make_build_steps = opt.make_build_steps,
     };
 
+    // these use an isolated appdata, otherwise an ad-hoc version set on the machine running
+    // the tests would be used
+    {
+        const t = test_factory.add(.{
+            .name = "test-init-no-version",
+            .input_dir = .no_input,
+            .options = .{ .appdata = .{ .default_verbosity = true } },
+            .offline = true,
+            .args = &.{"init"},
+        });
+        t.run.expectStdErrEqual("error: anyzig init requires a version, you can:\n" ++
+            "  1. run 'zig 0.13.0 init'\n" ++
+            "  2. set a version to use outside projects with 'zig any set-ad-hoc-version VERSION'\n");
+        t.run.expectExitCode(0xff);
+    }
+    {
+        const t = test_factory.add(.{
+            .name = "test-no-build-zig",
+            .input_dir = .no_input,
+            .options = .{ .appdata = .{ .default_verbosity = true } },
+            .offline = true,
+            .cwd_root = true,
+            .args = &.{"version"},
+        });
+        t.run.addCheck(.{ .expect_stderr_match = "no build.zig to pull a zig version from, you can:" });
+        t.run.addCheck(.{ .expect_stderr_match = "'zig any set-ad-hoc-version VERSION'" });
+        t.run.expectExitCode(0xff);
+    }
+
     {
         const t = test_factory.add(.{
             .name = "test-any",
@@ -262,6 +266,7 @@ fn addTests(
         ) });
         t.run.addCheck(.{ .expect_stderr_match = "zig any version" });
         t.run.addCheck(.{ .expect_stderr_match = "ANYZIG_VERBOSE=1" });
+        t.run.addCheck(.{ .expect_stderr_match = "zig any set-ad-hoc-version [VERSION]" });
         t.run.expectExitCode(0xff);
     }
 
@@ -283,6 +288,44 @@ fn addTests(
             .args = &.{ "any", "set-verbosity", "debug" },
         });
         t.run.expectStdErrEqual("anyzig: error: 'set-verbosity' was removed, set ANYZIG_VERBOSE=1 to log what anyzig is doing\n");
+        t.run.expectExitCode(1);
+    }
+
+    // these fail before touching appdata
+    inline for (.{
+        .{ "too-many", &[_][]const u8{ "0.14.0", "0.14.1" }, "anyzig: error: the 'set-ad-hoc-version' subcommand takes at most one VERSION\n" },
+        .{ "master", &[_][]const u8{"master"}, "anyzig: error: invalid VERSION 'master', expected a zig version like 0.15.2 (not master)\n" },
+    }) |case| {
+        const t = test_factory.add(.{
+            .name = "test-set-ad-hoc-version-" ++ case[0],
+            .input_dir = .no_input,
+            .options = .{ .appdata = .{ .default_verbosity = true } },
+            .offline = true,
+            .args = &([_][]const u8{ "any", "set-ad-hoc-version" } ++ case[1].*),
+        });
+        t.run.expectStdErrEqual(case[2]);
+        t.run.expectExitCode(1);
+    }
+    {
+        // clearing when nothing is set isn't an error
+        const t = test_factory.add(.{
+            .name = "test-clear-ad-hoc-version-unset",
+            .input_dir = .no_input,
+            .options = .{ .appdata = .{ .default_verbosity = true } },
+            .offline = true,
+            .args = &.{ "any", "set-ad-hoc-version" },
+        });
+        t.run.expectStdErrEqual("anyzig: no ad-hoc version is set\n");
+        t.run.expectExitCode(0);
+    }
+    {
+        const t = test_factory.add(.{
+            .name = "test-set-ad-hoc-version-not-a-release",
+            .input_dir = .no_input,
+            .options = .{ .appdata = .{ .saved_index = "{\"0.14.0\":{}}" } },
+            .args = &.{ "any", "set-ad-hoc-version", "12.2.1" },
+        });
+        t.run.addCheck(.{ .expect_stderr_match = "zig 12.2.1 is not a release" });
         t.run.expectExitCode(1);
     }
 
@@ -446,6 +489,61 @@ fn addTests(
         });
         warm.run.expectStdOutEqual("0.14.0\n");
         warm.run.addCheck(.{ .expect_stderr_match = "already exists" });
+
+        // the ad-hoc version is used outside projects
+        const ad_hoc_set = test_factory.add(.{
+            .name = "test-ad-hoc-version-set",
+            .input_dir = .{ .path = warm.output_dir },
+            .options = .{ .appdata = .{} },
+            .offline = true,
+            .args = &.{ "any", "set-ad-hoc-version", "0.14.0" },
+        });
+        ad_hoc_set.run.addCheck(.{ .expect_stderr_match = "zig 0.14.0 will be used outside projects" });
+        const ad_hoc_outside = test_factory.add(.{
+            .name = "test-ad-hoc-version-outside-project",
+            .input_dir = .{ .path = ad_hoc_set.output_dir },
+            .options = .{ .appdata = .{} },
+            .offline = true,
+            .cwd_root = true,
+            .args = &.{"version"},
+        });
+        ad_hoc_outside.run.expectStdOutEqual("0.14.0\n");
+        ad_hoc_outside.run.addCheck(.{ .expect_stderr_match = "ad-hoc version 0.14.0 from '" });
+        // once cleared, it isn't used outside projects any more
+        const ad_hoc_clear = test_factory.add(.{
+            .name = "test-clear-ad-hoc-version",
+            .input_dir = .{ .path = ad_hoc_outside.output_dir },
+            .options = .{ .appdata = .{} },
+            .offline = true,
+            .args = &.{ "any", "set-ad-hoc-version" },
+        });
+        ad_hoc_clear.run.addCheck(.{ .expect_stderr_match = "cleared the ad-hoc version (was '0.14.0')" });
+        const ad_hoc_cleared = test_factory.add(.{
+            .name = "test-clear-ad-hoc-version-outside-project",
+            .input_dir = .{ .path = ad_hoc_clear.output_dir },
+            .options = .{ .appdata = .{} },
+            .offline = true,
+            .cwd_root = true,
+            .args = &.{"version"},
+        });
+        ad_hoc_cleared.run.addCheck(.{ .expect_stderr_match = "no build.zig to pull a zig version from" });
+        ad_hoc_cleared.run.expectExitCode(0xff);
+        // and a project's version wins over it (0.14.1 isn't installed and we're offline)
+        const ad_hoc_set_other = test_factory.add(.{
+            .name = "test-ad-hoc-version-set-other",
+            .input_dir = .{ .path = warm.output_dir },
+            .options = .{ .appdata = .{} },
+            .offline = true,
+            .args = &.{ "any", "set-ad-hoc-version", "0.14.1" },
+        });
+        const ad_hoc_in_project = test_factory.add(.{
+            .name = "test-ad-hoc-version-in-project",
+            .input_dir = .{ .path = ad_hoc_set_other.output_dir },
+            .options = .{ .appdata = .{} },
+            .offline = true,
+            .args = &.{"version"},
+        });
+        ad_hoc_in_project.run.expectStdOutEqual("0.14.0\n");
 
         // the default verbosity only shows info, warnings and errors, there are none since it's installed
         const default_verbosity = test_factory.add(.{
@@ -885,6 +983,8 @@ const TestFactory = struct {
         /// "zig-0.14.0") until they're all waiting on it, then verifies exactly one of them
         /// installed it and the others used that install. Requires appdata.
         concurrent: ?struct { count: u8, install: []const u8 } = null,
+        /// Runs anyzig from the filesystem root so it's outside any project.
+        cwd_root: bool = false,
         /// Installs a fake zig that blocks on stdin, kills anyzig once it has started it and
         /// fails unless it dies too. Takes no args, requires appdata. Windows only.
         kill: bool = false,
@@ -936,6 +1036,7 @@ const TestFactory = struct {
         if (args.offline) run.addArg("--offline");
         if (args.concurrent) |c| run.addArg(b.fmt("--concurrent={}:{s}", .{ c.count, c.install }));
         if (args.kill) run.addArg("--kill");
+        if (args.cwd_root) run.addArg("--cwd-root");
         run.addArg("--");
         // wrap changes the cwd, so paths are passed absolute
         run.addArtifactArg2(self.anyzig, .{ .make_absolute = true });

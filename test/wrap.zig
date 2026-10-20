@@ -38,6 +38,7 @@ pub fn main(init: std.process.Init) !u8 {
     var mirror: ?MirrorMode = null;
     var saved_mirrors: ?[]const u8 = null;
     var saved_index: ?[]const u8 = null;
+    var cwd_root = false;
     const exe_index = blk: {
         var i: usize = 3;
         while (i < all_args.len) : (i += 1) {
@@ -71,6 +72,8 @@ pub fn main(init: std.process.Init) !u8 {
                 offline = true;
             } else if (std.mem.eql(u8, arg, "--kill")) {
                 kill = true;
+            } else if (std.mem.eql(u8, arg, "--cwd-root")) {
+                cwd_root = true;
             } else if (std.mem.startsWith(u8, arg, "--mirror=")) {
                 mirror = std.meta.stringToEnum(MirrorMode, arg["--mirror=".len..]) orelse
                     std.debug.panic("unknown mirror mode '{s}'", .{arg["--mirror=".len..]});
@@ -222,6 +225,12 @@ pub fn main(init: std.process.Init) !u8 {
     }
 
     const argv = all_args[exe_index..];
+    if (cwd_root) {
+        // these write files relative to the output directory
+        if (mirror != null or kill or concurrent != null) std.debug.panic("--cwd-root can't be used with --mirror, --kill or --concurrent", .{});
+        // no build.zig can be found from here, so anyzig is outside any project
+        try std.process.setCurrentPath(io, if (builtin.os.tag == .windows) "C:\\" else "/");
+    }
     if (mirror) |mode| return runWithMirror(io, arena, argv, env, mode);
     if (kill) {
         if (builtin.os.tag != .windows) std.debug.panic(
