@@ -1,0 +1,10 @@
+// Budgets for anyzig's hot path (a cache hit), measured on the x86_64-linux release
+// build by test/hotpath.zig. Raising these should be a deliberate decision that shows up
+// in review, not something that creeps in.
+//
+// Measured when set: 60,594 instructions, 35 syscalls. The instruction count drifts a
+// little with the length of the working directory path (~2% for 70 more characters).
+.{
+    .instructions = 67_000,
+    .syscalls = 40,
+}
