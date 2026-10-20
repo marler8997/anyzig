@@ -1248,6 +1248,7 @@ const os = switch (native_os) {
     .linux => "linux",
     .macos => "macos",
     .netbsd => "netbsd",
+    .openbsd => "openbsd",
     .windows => "windows",
     else => @compileError("Unsupported OS"),
 };
