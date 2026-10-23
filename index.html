@@ -180,28 +180,37 @@ function copyToClipboard(text) {
       html = '';
 
       if (arch_os != null) {
-          const basename = 'anyzig-' + arch_os + archive_ext;
-          const archive_url = 'https://github.com/marler8997/anyzig/releases/latest/download/' + basename;
-          html += '<br/><h2 style="margin:15px"><a href="' + archive_url + '">' + basename + '</a></h2>';
-
-          html += '<br/><h2>Command Line Install:</h2>';
-          html += "<section><div class='Commands'>";
           var ids = { next_id: 0 };
-          if (include_brew) {
-              html += generateCommandHtml(ids, 'brew tap anyzig/tap && brew install anyzig');
-          }
-          if (include_curl) {
-              html += generateCommandHtml(ids, 'curl -L ' + archive_url + ' | tar xz');
-          }
-          if (include_wget) {
-              html += generateCommandHtml(ids, 'wget -O - ' + archive_url + ' | tar xz');
-          }
-          if (include_powershell) {
-              html += generateCommandHtml(ids, "Invoke-WebRequest -Uri " + archive_url + " -OutFile \"anyzig-"  + arch_os + ".zip\"; Expand-Archive -Path \"anyzig-" + arch_os + ".zip\" -DestinationPath \"anyzig\"");
-          }
-          html += "</div></section>";
+          html += installHtml(ids, 'anyzig', arch_os, archive_ext, include_brew);
+          html += '<br/><br/><h1>Optional: anyzls</h1>';
+          html += '<p style="margin:10px">A <code style="padding:0.2em">zls</code> that runs the zls compatible with your project\'s zig version.<br/>' +
+              'It\'s a separate download so installing anyzig never replaces your own zls. ' +
+              'See the <a href="https://github.com/marler8997/anyzig#anyzls">README</a>.</p>';
+          html += installHtml(ids, 'anyzls', arch_os, archive_ext, false);
       }
       get('InstallDiv').innerHTML = html;
+  }
+
+  function installHtml(ids, name, arch_os, archive_ext, with_brew) {
+      const basename = name + '-' + arch_os + archive_ext;
+      const archive_url = 'https://github.com/marler8997/anyzig/releases/latest/download/' + basename;
+      var html = '<br/><h2 style="margin:15px"><a href="' + archive_url + '">' + basename + '</a></h2>';
+      html += '<br/><h2>Command Line Install:</h2>';
+      html += "<section><div class='Commands'>";
+      if (with_brew) {
+          html += generateCommandHtml(ids, 'brew tap anyzig/tap && brew install anyzig');
+      }
+      if (include_curl) {
+          html += generateCommandHtml(ids, 'curl -L ' + archive_url + ' | tar xz');
+      }
+      if (include_wget) {
+          html += generateCommandHtml(ids, 'wget -O - ' + archive_url + ' | tar xz');
+      }
+      if (include_powershell) {
+          html += generateCommandHtml(ids, "Invoke-WebRequest -Uri " + archive_url + " -OutFile \"" + basename + "\"; Expand-Archive -Path \"" + basename + "\" -DestinationPath \"" + name + "\"");
+      }
+      html += "</div></section>";
+      return html;
   }
 
   function bodyOnload() {
