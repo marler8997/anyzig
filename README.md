@@ -45,6 +45,20 @@ Mach is a game engine that provides a mirror to download the zig compiler as wel
 
 > The reason for using `.mach_zig_version` instead of `.minimum_zig_version` is that in the future, zig will likely do some verification of the minimum_zig_version field and using a mach version there is likely to fail.
 
+# anyzls
+
+anyzig also has a `zls` executable ("anyzls") that stands in for the [zls](https://github.com/zigtools/zls) language server. It finds the project's zig version the same way `zig` does and runs a zls that's compatible with it.
+
+Unlike zig, the zls for a zig version can't be determined from the version alone (i.e. zig 0.15.2 uses zls 0.15.1, and zig dev versions use zls dev builds with their own versions). The first time anyzls runs for a zig version it asks zigtools' [select-version](https://github.com/zigtools/release-worker) service which zls to use, downloads it, and saves that choice. After that it always runs the saved zls without any network access, even if a newer compatible zls has been published. Mach versions use the zig version from mach's download index.
+
+Run `zls update` in a project to check for a newer compatible zls. If there is one, it's downloaded and used from then on (the old one is kept). Otherwise it reports that zls is up to date.
+
+All other arguments (i.e. `--version`, `--config-path`) are passed to zls.
+
+Installs are in `APPDATA/zls/ZLS_VERSION` and the zls saved for each zig version is in `APPDATA/zls-version/ZIG_VERSION` (see [Where Compilers Are Installed](#where-compilers-are-installed) for `APPDATA`).
+
+To use it, download the `anyzls` archive for your OS/arch from Releases (or build it with `zig build zls -- --version`, which installs it to `zig-out/bin/zls`) and either put it in your `PATH` as `zls` or point your editor's zls path setting at it. Editors start zls in the project directory, which is where anyzls looks for `build.zig.zon`. If you use VS Code, the [Zig extension](https://github.com/ziglang/vscode-zig) already manages zls for you.
+
 # TODO
 
 - list the zig versions available to download, and a way to remove installed ones (`zig any list-installed` lists what's installed)

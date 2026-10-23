@@ -38,6 +38,8 @@ pub fn main(init: std.process.Init) !u8 {
     var mirror: ?MirrorMode = null;
     var saved_mirrors: ?[]const u8 = null;
     var saved_index: ?[]const u8 = null;
+    var saved_mach_index: ?[]const u8 = null;
+    var saved_zls_version: ?[]const u8 = null;
     var cwd_root = false;
     const exe_index = blk: {
         var i: usize = 3;
@@ -81,6 +83,11 @@ pub fn main(init: std.process.Init) !u8 {
                 saved_mirrors = arg["--saved-mirrors=".len..];
             } else if (std.mem.startsWith(u8, arg, "--saved-index=")) {
                 saved_index = arg["--saved-index=".len..];
+            } else if (std.mem.startsWith(u8, arg, "--saved-mach-index=")) {
+                saved_mach_index = arg["--saved-mach-index=".len..];
+            } else if (std.mem.startsWith(u8, arg, "--saved-zls-version=")) {
+                // ZIG:ZLS, i.e. 0.16.0:0.16.0
+                saved_zls_version = arg["--saved-zls-version=".len..];
             } else if (std.mem.startsWith(u8, arg, "--concurrent=")) {
                 // COUNT:INSTALL, i.e. 2:zig-0.14.0
                 var it = std.mem.splitScalar(u8, arg["--concurrent=".len..], ':');
@@ -92,9 +99,11 @@ pub fn main(init: std.process.Init) !u8 {
     };
     if (!isolate_appdata and (corrupt_entry != null or legacy_install != null or
         expect_legacy_install != null or uninstall != null or remove_exe != null or abandoned_installs != null or lockless_installs != null or
-        expect_no_abandoned_installs or concurrent != null or default_verbosity or kill or mirror != null or saved_mirrors != null or saved_index != null)) std.debug.panic(
+        expect_no_abandoned_installs or concurrent != null or default_verbosity or kill or mirror != null or saved_mirrors != null or saved_index != null or
+        saved_mach_index != null or saved_zls_version != null)) std.debug.panic(
         "--corrupt-entry, --legacy-install, --expect-legacy-install, --uninstall, --remove-exe, --abandoned-installs, --lockless-installs, " ++
-            "--expect-no-abandoned-installs, --concurrent, --default-verbosity, --kill, --mirror, --saved-mirrors and --saved-index require --appdata " ++
+            "--expect-no-abandoned-installs, --concurrent, --default-verbosity, --kill, --mirror, --saved-mirrors, --saved-index, " ++
+            "--saved-mach-index and --saved-zls-version require --appdata " ++
             "(we never modify or inspect the real appdata)",
         .{},
     );
@@ -207,6 +216,19 @@ pub fn main(init: std.process.Init) !u8 {
     if (saved_index) |content| {
         try Dir.cwd().createDirPath(io, anyzig_appdata);
         try Dir.cwd().writeFile(io, .{ .sub_path = anyzig_appdata ++ "/download-index.json", .data = content });
+    }
+    if (saved_mach_index) |content| {
+        try Dir.cwd().createDirPath(io, anyzig_appdata);
+        try Dir.cwd().writeFile(io, .{ .sub_path = anyzig_appdata ++ "/download-index-mach.json", .data = content });
+    }
+    if (saved_zls_version) |v| {
+        var it = std.mem.splitScalar(u8, v, ':');
+        const zig_version = it.first();
+        try Dir.cwd().createDirPath(io, anyzig_appdata ++ "/zls-version");
+        try Dir.cwd().writeFile(io, .{
+            .sub_path = try std.fmt.allocPrint(arena, anyzig_appdata ++ "/zls-version/{s}", .{zig_version}),
+            .data = try std.fmt.allocPrint(arena, "{s}\n", .{it.rest()}),
+        });
     }
     if (corrupt_entry) |entry| {
         var hashstore = try Dir.cwd().openDir(io, hashstore_path, .{});
