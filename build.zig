@@ -73,7 +73,7 @@ pub fn build(b: *std.Build) !void {
         break :blk exe;
     };
 
-    {
+    const zls = blk: {
         const exe = b.addExecutable(.{
             .name = "zls",
             .root_module = b.createModule(.{
@@ -94,7 +94,8 @@ pub fn build(b: *std.Build) !void {
         run.step.dependOn(&install.step);
         run.addPassthruArgs();
         b.step("zls", "").dependOn(&run.step);
-    }
+        break :blk exe;
+    };
 
     const atleast_xcode26_4 = b.option(
         bool,
@@ -103,7 +104,7 @@ pub fn build(b: *std.Build) !void {
     ) orelse false;
 
     const test_step = b.step("test", "");
-    addTests(b, dev_version, anyzig, test_step, .{ .make_build_steps = true, .old_zig_builds = !atleast_xcode26_4 });
+    addTests(b, dev_version, anyzig, zls, test_step, .{ .make_build_steps = true, .old_zig_builds = !atleast_xcode26_4 });
     {
         const unit_test_step = b.step("unit-test", "Run the unit tests");
         test_step.dependOn(unit_test_step);
@@ -187,6 +188,7 @@ fn addTests(
     b: *std.Build,
     version: []const u8,
     anyzig: *std.Build.Step.Compile,
+    zls: *std.Build.Step.Compile,
     test_step: *std.Build.Step,
     opt: SharedTestOptions,
 ) void {
@@ -214,6 +216,7 @@ fn addTests(
         .b = b,
         .test_step = test_step,
         .anyzig = anyzig,
+        .zls = zls,
         .wrap_exe = b.addExecutable(.{
             .name = "wrap",
             .root_module = b.createModule(.{
@@ -725,6 +728,142 @@ fn addTests(
         t.run.expectExitCode(1);
     }
 
+    // zls versions don't follow zig's, zigtools selects one. These run 'zls --version' because
+    // older zls (i.e. 0.13) don't have a version command, which also checks flags reach zls.
+    {
+        const project = b.addWriteFiles();
+        _ = project.add("build.zig", "");
+        _ = project.add("build.zig.zon", ".{ .minimum_zig_version = \"0.15.2\" }\n");
+        const cold = test_factory.add(.{
+            .name = "test-zls-release",
+            .exe = .zls,
+            .input_dir = .{ .path = project.getDirectory() },
+            .options = .{ .appdata = .{} },
+            .args = &.{"--version"},
+        });
+        cold.run.expectStdOutEqual("0.15.1\n");
+        cold.run.addCheck(.{ .expect_stderr_match = "zig 0.15.2 uses zls 0.15.1" });
+
+        const warm = test_factory.add(.{
+            .name = "test-zls-release-warm",
+            .exe = .zls,
+            .input_dir = .{ .path = cold.output_dir },
+            .options = .{ .appdata = .{} },
+            .offline = true,
+            .args = &.{"--version"},
+        });
+        warm.run.expectStdOutEqual("0.15.1\n");
+
+        const up_to_date = test_factory.add(.{
+            .name = "test-zls-update-up-to-date",
+            .exe = .zls,
+            .input_dir = .{ .path = warm.output_dir },
+            .options = .{ .appdata = .{} },
+            .args = &.{"update"},
+        });
+        up_to_date.run.addCheck(.{ .expect_stderr_match = "zls 0.15.1 for zig 0.15.2 is up to date" });
+        up_to_date.run.expectExitCode(0);
+
+        // the saved zls is used even though zigtools selects a newer one, until it's updated
+        const saved = test_factory.add(.{
+            .name = "test-zls-saved-version",
+            .exe = .zls,
+            .input_dir = .{ .path = warm.output_dir },
+            .options = .{ .appdata = .{ .saved_zls_version = .{ .zig = "0.16.0", .zls = "0.15.1" } } },
+            .offline = true,
+            .args = &.{ "0.16.0", "--version" },
+        });
+        saved.run.expectStdOutEqual("0.15.1\n");
+
+        const update = test_factory.add(.{
+            .name = "test-zls-update",
+            .exe = .zls,
+            .input_dir = .{ .path = saved.output_dir },
+            .options = .{ .appdata = .{} },
+            .args = &.{ "0.16.0", "update" },
+        });
+        update.run.addCheck(.{ .expect_stderr_match = "updated zls for zig 0.16.0 from 0.15.1 to 0.16.1" });
+        update.run.expectExitCode(0);
+
+        const updated = test_factory.add(.{
+            .name = "test-zls-updated",
+            .exe = .zls,
+            .input_dir = .{ .path = update.output_dir },
+            .options = .{ .appdata = .{} },
+            .offline = true,
+            .args = &.{ "0.16.0", "--version" },
+        });
+        updated.run.expectStdOutEqual("0.16.1\n");
+    }
+    // dev versions use zls dev builds, mach versions use the zig version mach nominated
+    for ([_]struct { []const u8, []const u8, []const u8 }{
+        .{ "dev", ".minimum_zig_version = \"0.17.0-dev.2228+955228b68\"", "0.17.0-dev." },
+        .{ "mach", ".mach_zig_version = \"2026.4.10-mach\"", "0.16.0-dev." },
+    }) |case| {
+        const project = b.addWriteFiles();
+        _ = project.add("build.zig", "");
+        _ = project.add("build.zig.zon", b.fmt(".{{ {s} }}\n", .{case[1]}));
+        const t = test_factory.add(.{
+            .name = b.fmt("test-zls-{s}", .{case[0]}),
+            .exe = .zls,
+            .input_dir = .{ .path = project.getDirectory() },
+            .options = .{ .appdata = .{} },
+            .args = &.{"--version"},
+        });
+        t.run.addCheck(.{ .expect_stdout_match = case[2] });
+        t.run.expectExitCode(0);
+    }
+    // zigtools has no zls builds for the 0.13 dev cycle (or for aarch64-windows), the saved mach
+    // index doesn't have the version so it's fetched again
+    if (!(builtin.os.tag == .windows and builtin.cpu.arch == .aarch64)) {
+        const project = b.addWriteFiles();
+        _ = project.add("build.zig", "");
+        _ = project.add("build.zig.zon", ".{ .mach_zig_version = \"2024.5.0-mach\" }\n");
+        const t = test_factory.add(.{
+            .name = "test-zls-mach-old",
+            .exe = .zls,
+            .input_dir = .{ .path = project.getDirectory() },
+            .options = .{ .appdata = .{ .saved_mach_index = "{}" } },
+            .args = &.{"--version"},
+        });
+        t.run.expectStdOutEqual("0.13.0\n");
+        t.run.addCheck(.{ .expect_stderr_match = "using zls 0.13.0 from the 0.13.0 release" });
+    }
+    {
+        // zigtools' reason is reported when it has no zls for the zig version
+        const t = test_factory.add(.{
+            .name = "test-zls-unsupported",
+            .exe = .zls,
+            .input_dir = .no_input,
+            .options = .{ .appdata = .{} },
+            .args = &.{ "0.8.0", "--version" },
+        });
+        t.run.addCheck(.{ .expect_stderr_match = "zigtools has no zls for zig 0.8.0: Zig 0.8.0 is not supported by ZLS" });
+        t.run.expectExitCode(1);
+    }
+    {
+        // 'zls update' installs a zls when none is saved, which is then used
+        const update = test_factory.add(.{
+            .name = "test-zls-update-unsaved",
+            .exe = .zls,
+            .input_dir = .no_input,
+            .options = .{ .appdata = .{} },
+            .args = &.{ "0.15.2", "update" },
+        });
+        update.run.addCheck(.{ .expect_stderr_match = "installed zls 0.15.1 for zig 0.15.2" });
+        update.run.expectExitCode(0);
+
+        const updated = test_factory.add(.{
+            .name = "test-zls-update-unsaved-run",
+            .exe = .zls,
+            .input_dir = .{ .path = update.output_dir },
+            .options = .{ .appdata = .{} },
+            .offline = true,
+            .args = &.{ "0.15.2", "--version" },
+        });
+        updated.run.expectStdOutEqual("0.15.1\n");
+    }
+
     // The mirror tests use a dev build that doesn't exist (ziglang.org deletes old ones) and
     // make ziglang.org unreachable, so they fail once anyzig falls back to it.
     const missing_dev_version = "0.15.0-dev.1+aaaaaaaaa";
@@ -931,11 +1070,13 @@ const TestFactory = struct {
     b: *std.Build,
     test_step: *std.Build.Step,
     anyzig: *std.Build.Step.Compile,
+    zls: *std.Build.Step.Compile,
     wrap_exe: *std.Build.Step.Compile,
     make_build_steps: bool,
 
     pub fn add(self: *const TestFactory, args: struct {
         name: []const u8,
+        exe: Exe = .zig,
         input_dir: union(enum) {
             no_input,
             path: std.Build.LazyPath,
@@ -974,6 +1115,10 @@ const TestFactory = struct {
                 saved_mirrors: []const []const u8 = &.{},
                 /// save this as the official download index from a previous download
                 saved_index: ?[]const u8 = null,
+                /// save this as the mach download index from a previous download
+                saved_mach_index: ?[]const u8 = null,
+                /// save this zls version as the one used for this zig version
+                saved_zls_version: ?struct { zig: []const u8, zls: []const u8 } = null,
             },
         },
         /// Points the http proxies at a dead port so any attempt to use the network
@@ -1027,6 +1172,8 @@ const TestFactory = struct {
                 if (appdata.expect_no_abandoned_installs) run.addArg("--expect-no-abandoned-installs");
                 if (appdata.mirror) |mode| run.addArg(b.fmt("--mirror={t}", .{mode}));
                 if (appdata.saved_index) |content| run.addArg(b.fmt("--saved-index={s}", .{content}));
+                if (appdata.saved_mach_index) |content| run.addArg(b.fmt("--saved-mach-index={s}", .{content}));
+                if (appdata.saved_zls_version) |v| run.addArg(b.fmt("--saved-zls-version={s}:{s}", .{ v.zig, v.zls }));
                 if (appdata.saved_mirrors.len > 0) run.addArg(b.fmt(
                     "--saved-mirrors={s}",
                     .{std.mem.join(b.allocator, ",", appdata.saved_mirrors) catch @panic("OOM")},
@@ -1039,7 +1186,10 @@ const TestFactory = struct {
         if (args.cwd_root) run.addArg("--cwd-root");
         run.addArg("--");
         // wrap changes the cwd, so paths are passed absolute
-        run.addArtifactArg2(self.anyzig, .{ .make_absolute = true });
+        run.addArtifactArg2(switch (args.exe) {
+            .zig => self.anyzig,
+            .zls => self.zls,
+        }, .{ .make_absolute = true });
         for (args.args) |a| {
             run.addArg(a);
         }
@@ -1160,7 +1310,7 @@ fn addReleaseSteps(
         );
 
         const target_test_step = b.step(b.fmt("test-{s}", .{release_target_str}), "");
-        addTests(b, release_version, zig_exe, target_test_step, .{
+        addTests(b, release_version, zig_exe, zls_exe, target_test_step, .{
             .make_build_steps = false,
             .old_zig_builds = true,
         });
