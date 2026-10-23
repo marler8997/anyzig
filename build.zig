@@ -1173,50 +1173,40 @@ fn addReleaseSteps(
             if (os_compatible and arch_compatible) {
                 release_step.dependOn(target_test_step);
             }
-            make_archive_step.dependOn(makeReleaseArchiveStep(
-                b,
-                release_target_str,
-                target.result,
-                zig_exe,
-                zls_exe,
-                host_zip_exe,
-            ));
+            make_archive_step.dependOn(makeReleaseArchiveStep(b, "anyzig", release_target_str, target.result, zig_exe, host_zip_exe));
+            make_archive_step.dependOn(makeReleaseArchiveStep(b, "anyzls", release_target_str, target.result, zls_exe, host_zip_exe));
         }
     }
 }
 
+/// Archives one exe (and its pdb on windows). zls is in its own anyzls archive so extracting
+/// the anyzig archive never replaces a zls that isn't anyzig's.
 fn makeReleaseArchiveStep(
     b: *std.Build,
+    archive_prefix: []const u8,
     release_target_str: []const u8,
     target: std.Target,
-    zig_exe: *std.Build.Step.Compile,
-    zls_exe: *std.Build.Step.Compile,
+    exe: *std.Build.Step.Compile,
     host_zip_exe: *std.Build.Step.Compile,
 ) *std.Build.Step {
-    // not sure yet if we want to include zls.exe in our archives?
-    const include_zls = false;
-
     const stage = b.addWriteFiles();
-    _ = stage.addCopyFile(zig_exe.getEmittedBin(), zig_exe.out_filename);
-    if (include_zls) _ = stage.addCopyFile(zls_exe.getEmittedBin(), zls_exe.out_filename);
+    _ = stage.addCopyFile(exe.getEmittedBin(), exe.out_filename);
 
     if (target.os.tag == .windows) {
-        _ = stage.addCopyFile(zig_exe.getEmittedPdb(), "zig.pdb");
-        if (include_zls) _ = stage.addCopyFile(zls_exe.getEmittedPdb(), "zls.pdb");
-        const basename = b.fmt("anyzig-{s}.zip", .{release_target_str});
+        const pdb = b.fmt("{s}.pdb", .{exe.name});
+        _ = stage.addCopyFile(exe.getEmittedPdb(), pdb);
+        const basename = b.fmt("{s}-{s}.zip", .{ archive_prefix, release_target_str });
         const zip = b.addRunArtifact(host_zip_exe);
         const out_zip_file = zip.addOutputFileArg2(basename, .{});
-        zip.addArgs(&.{ "zig.exe", "zig.pdb" });
-        if (include_zls) zip.addArgs(&.{ "zls.exe", "zls.pdb" });
+        zip.addArgs(&.{ exe.out_filename, pdb });
         zip.setCwd(stage.getDirectory());
         return &b.addInstallFile(out_zip_file, basename).step;
     }
 
-    const basename = b.fmt("anyzig-{s}.tar.gz", .{release_target_str});
+    const basename = b.fmt("{s}-{s}.tar.gz", .{ archive_prefix, release_target_str });
     const tar = b.addSystemCommand(&.{ "tar", "-czf" });
     const targz = tar.addOutputFileArg2(basename, .{});
-    tar.addArg("zig");
-    if (include_zls) tar.addArg("zls");
+    tar.addArg(exe.out_filename);
     tar.setCwd(stage.getDirectory());
     return &b.addInstallFile(targz, basename).step;
 }

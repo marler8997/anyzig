@@ -21,7 +21,7 @@ Set environment variable `ANYZIG_VERBOSE` to any non-empty value to enable verbo
 
 Go to https://marler8997.github.io/anyzig and select your OS/Arch to get a download link and/or instructions to install via the command-line.
 
-Otherwise, you can manually find and download/extract the applicable archive from Releases. It will contain a single static binary named `zig`, unless you're on Windows in which case it's 2 files, `zig.exe` and `zig.pdb`.
+Otherwise, you can manually find and download/extract the applicable archive from Releases. It will contain a single static binary named `zig`, unless you're on Windows in which case it's 2 files, `zig.exe` and `zig.pdb`. The `anyzls` archives are the same but contain anyzig's `zls` executable instead, they're separate so installing anyzig never replaces your own zls.
 
 # Where Compilers Are Installed
 
