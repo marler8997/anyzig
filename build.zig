@@ -89,6 +89,7 @@ pub fn build(b: *std.Build) !void {
         });
         setBuildOptions(b, exe, .zls);
         const install = b.addInstallArtifact(exe, .{});
+        b.step("install-zls", "Install the anyzls executable").dependOn(&install.step);
 
         const run = b.addRunArtifact(exe);
         run.step.dependOn(&install.step);
