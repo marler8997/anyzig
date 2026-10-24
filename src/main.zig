@@ -1022,6 +1022,11 @@ fn anyCommandUsage() !u8 {
             "Here are the anyzig-specific subcommands:\n" ++
             "  zig any version                      | print the version of anyzig to stdout\n" ++
             "  zig any list-installed               | list all versions of zig installed by anyzig\n" ++
+            (if (build_options.exe == .zig)
+                "  zig any releases [--no-fetch]        | list the zig releases and the latest master version,\n" ++
+                    "                                       | --no-fetch uses the index saved by the last fetch\n"
+            else
+                "") ++
             "  zig any set-ad-hoc-version [VERSION] | set the zig version to use outside projects,\n" ++
             "                                       | omit VERSION to clear it\n" ++
             "Set " ++ verbose_env ++ "=1 to log what anyzig is doing.\n",
@@ -1063,6 +1068,16 @@ fn anyCommand(cmdline: Cmdline, cmdline_offset: usize, environ: process.Environ,
     } else if (std.mem.eql(u8, command, "list-installed")) {
         if (arg_offset < cmdline.len()) errExit("the 'list-installed' subcommand does not take any cmdline args", .{});
         try listInstalled(app_data);
+        return 0;
+    } else if (build_options.exe == .zig and std.mem.eql(u8, command, "releases")) {
+        var fetch = true;
+        for (arg_offset..cmdline.len()) |i| {
+            const arg = cmdline.arg(i);
+            if (std.mem.eql(u8, arg, "--no-fetch")) {
+                fetch = false;
+            } else errExit("unknown 'releases' option '{s}'", .{arg});
+        }
+        try listReleases(global.arena, environ, app_data, fetch);
         return 0;
     } else errExit("unknown zig any '{s}' command", .{command});
 }
@@ -1180,6 +1195,54 @@ fn listInstalled(app_data: [:0]const u8) !void {
     for (installed.items) |i| {
         try filePrint(.stdout(), "{f}\t{s}{c}{s}\n", .{ i.version, installs_path, Dir.path.sep, i.name });
     }
+}
+
+/// Unless `fetch` is false, fetches the download index so the list is current.
+fn listReleases(arena: Allocator, environ: process.Environ, app_data: [:0]const u8, fetch: bool) !void {
+    const index_path = Dir.path.join(arena, &.{ app_data, DownloadIndexKind.official.basename() }) catch |e| oom(e);
+    if (fetch) fetchFile(arena, environ, app_data, DownloadIndexKind.official.uri(), index_path, .err) catch |err| return switch (err) {
+        error.ReportedFetchFailed, error.ReportedHttpNotFound => error.Reported,
+        error.Reported => |e| e,
+    };
+    const content = Dir.cwd().readFileAlloc(io, index_path, arena, .unlimited) catch |err| return switch (err) {
+        error.FileNotFound => reportErr("there's no saved download index, run 'zig any releases' without --no-fetch", .{}),
+        else => |e| pathErr("read", index_path, e),
+    };
+    const root = std.json.parseFromSliceLeaky(std.json.Value, arena, content, .{}) catch |err|
+        return reportErr("download index '{s}' is invalid JSON ({t})", .{ index_path, err });
+    if (root != .object) return reportErr("download index '{s}' is not a JSON object", .{index_path});
+
+    var releases: std.ArrayList(SemanticVersion) = .empty;
+    for (root.object.keys()) |key| {
+        if (std.mem.eql(u8, key, "master")) continue;
+        const version = SemanticVersion.parse(key) orelse {
+            log.debug("skipping '{s}' in the download index, it's not a version", .{key});
+            continue;
+        };
+        releases.append(arena, version) catch |e| oom(e);
+    }
+    std.mem.sort(SemanticVersion, releases.items, {}, struct {
+        fn lessThan(_: void, a: SemanticVersion, b: SemanticVersion) bool {
+            return a.ref().order(b.ref()) == .lt;
+        }
+    }.lessThan);
+
+    var buf: [4096]u8 = undefined;
+    var file_writer = File.stdout().writerStreaming(io, &buf);
+    const w = &file_writer.interface;
+    for (releases.items) |*version| {
+        w.print("{f}{s}\n", .{ version.*, if (try isInstalled(arena, app_data, version)) "\tinstalled" else "" }) catch
+            return file_writer.err.?;
+    }
+    if (root.object.get("master")) |master| {
+        const version_val = master.object.get("version") orelse
+            return reportErr("download index \"master\" object is missing the \"version\" property", .{});
+        const version = SemanticVersion.parse(version_val.string) orelse
+            return reportErr("unable to parse download index master version '{s}'", .{version_val.string});
+        w.print("master\t{f}{s}\n", .{ version, if (try isInstalled(arena, app_data, &version)) "\tinstalled" else "" }) catch
+            return file_writer.err.?;
+    }
+    w.flush() catch return file_writer.err.?;
 }
 
 fn hashstoreName(version: *const SemanticVersion) BoundedString(exe_str.len + 1 + SemanticVersion.max_string) {

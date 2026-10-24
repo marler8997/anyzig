@@ -574,6 +574,17 @@ fn addTests(
         });
         list_installed.run.expectExitCode(0);
 
+        // the official releases oldest first then master, marking what's installed
+        const releases = test_factory.add(.{
+            .name = "test-releases",
+            .input_dir = .{ .path = warm.output_dir },
+            .options = .{ .appdata = .{} },
+            .args = &.{ "any", "releases" },
+        });
+        releases.run.addCheck(.{ .expect_stdout_match = "\n0.17.0\nmaster\t0." });
+        releases.run.addCheck(.{ .expect_stdout_match = "\n0.13.0\n0.14.0\tinstalled\n0.14.1\n" });
+        releases.run.expectExitCode(0);
+
         // Older versions of anyzig installed compilers in zig's global cache, these are
         // copied to the new location when they're first used. Two processes migrate at
         // once, only one of them copies it and the other uses that copy.
@@ -675,6 +686,45 @@ fn addTests(
         t.run.expectStdOutEqual("0.14.0\n0.14.0\n");
     }
 
+    {
+        // the list is always fetched, a saved download index isn't used since it could be stale
+        const t = test_factory.add(.{
+            .name = "test-releases-offline",
+            .input_dir = .no_input,
+            .options = .{ .appdata = .{ .saved_index = "{\"0.14.0\":{}}" } },
+            .offline = true,
+            .args = &.{ "any", "releases" },
+        });
+        t.run.addCheck(.{ .expect_stderr_match = "error: fetch 'https://ziglang.org/download/index.json' failed" });
+        t.run.expectStdOutEqual("");
+        t.run.expectExitCode(1);
+    }
+    {
+        // --no-fetch lists the saved download index without the network
+        const t = test_factory.add(.{
+            .name = "test-releases-no-fetch",
+            .input_dir = .no_input,
+            .options = .{ .appdata = .{ .saved_index = "{\"0.14.1\":{},\"master\":{\"version\":\"0.15.0-dev.1+abc\"},\"0.9.0\":{}}" } },
+            .offline = true,
+            .args = &.{ "any", "releases", "--no-fetch" },
+        });
+        t.run.expectStdOutEqual("0.9.0\n0.14.1\nmaster\t0.15.0-dev.1+abc\n");
+        t.run.expectExitCode(0);
+    }
+    inline for (.{
+        .{ "no-fetch-unsaved", &[_][]const u8{"--no-fetch"}, "anyzig: error: there's no saved download index, run 'zig any releases' without --no-fetch\n" },
+        .{ "bad-option", &[_][]const u8{"--bad"}, "anyzig: error: unknown 'releases' option '--bad'\n" },
+    }) |case| {
+        const t = test_factory.add(.{
+            .name = "test-releases-" ++ case[0],
+            .input_dir = .no_input,
+            .options = .{ .appdata = .{ .default_verbosity = true } },
+            .offline = true,
+            .args = &([_][]const u8{ "any", "releases" } ++ case[1].*),
+        });
+        t.run.expectStdErrEqual(case[2]);
+        t.run.expectExitCode(1);
+    }
     {
         const t = test_factory.add(.{
             .name = "test-not-a-release",
