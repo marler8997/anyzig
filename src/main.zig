@@ -1281,7 +1281,7 @@ const VersionSpecifier = union(enum) {
 
 const arch = switch (builtin.cpu.arch) {
     .aarch64 => "aarch64",
-    .arm => "armv7a",
+    .arm => "arm",
     .powerpc64 => "powerpc64",
     .powerpc64le => "powerpc64le",
     .riscv64 => "riscv64",
@@ -1300,8 +1300,11 @@ const os = switch (native_os) {
     else => @compileError("Unsupported OS"),
 };
 
-const os_arch = os ++ "-" ++ arch;
 pub const arch_os = arch ++ "-" ++ os;
+/// zig's name for the arch in urls before arm_rename_release
+const old_arch = if (builtin.cpu.arch == .arm) "armv7a" else arch;
+const old_arch_os = old_arch ++ "-" ++ os;
+const os_old_arch = os ++ "-" ++ old_arch;
 const archive_ext = if (native_os == .windows) "zip" else "tar.xz";
 
 const VersionKind = union(enum) { release: Release, dev };
@@ -1362,26 +1365,33 @@ const Release = struct {
 
 // The Zig release where the OS-ARCH in the url was swapped to ARCH-OS
 const arch_os_swap_release: Release = .{ .major = 0, .minor = 14, .patch = 1 };
+// The Zig release where armv7a was renamed to arm in the url, its dev builds have the new name
+const arm_rename_release: Release = .{ .major = 0, .minor = 15, .patch = 0 };
 
 fn makeOfficialUrl(arena: Allocator, semantic_version: SemanticVersion) DownloadUrl {
-    return switch (determineVersionKind(semantic_version)) {
-        .dev => DownloadUrl.initOfficial(std.fmt.allocPrint(
+    const release: Release = .{
+        .major = semantic_version.major,
+        .minor = semantic_version.minor,
+        .patch = semantic_version.patch,
+    };
+    const name = if (release.order(arm_rename_release) != .lt)
+        arch_os
+    else if (determineVersionKind(semantic_version) == .dev or release.order(arch_os_swap_release) != .lt)
+        old_arch_os
+    else
+        os_old_arch;
+    return DownloadUrl.initOfficial(switch (determineVersionKind(semantic_version)) {
+        .dev => std.fmt.allocPrint(
             arena,
-            "https://ziglang.org/builds/zig-" ++ arch_os ++ "-{f}." ++ archive_ext,
-            .{semantic_version},
-        ) catch |e| oom(e)),
-        .release => |release| DownloadUrl.initOfficial(std.fmt.allocPrint(
+            "https://ziglang.org/builds/zig-{s}-{f}." ++ archive_ext,
+            .{ name, semantic_version },
+        ),
+        .release => std.fmt.allocPrint(
             arena,
             "https://ziglang.org/download/{0f}/zig-{1s}-{0f}." ++ archive_ext,
-            .{
-                semantic_version,
-                switch (release.order(arch_os_swap_release)) {
-                    .lt => os_arch,
-                    .gt, .eq => arch_os,
-                },
-            },
-        ) catch |e| oom(e)),
-    };
+            .{ semantic_version, name },
+        ),
+    } catch |e| oom(e));
 }
 
 /// Fails if the official download index doesn't have the release (i.e. a typo) rather than
@@ -1637,7 +1647,8 @@ fn getVersionUrl(
     if (!isMachVersion(semantic_version)) return makeOfficialUrl(arena, semantic_version);
 
     const entry = try machIndexEntry(arena, environ, app_data, semantic_version);
-    const arch_os_obj = entry.object.get(arch_os) orelse std.debug.panic(
+    // the mach index uses zig's name for the arch at the time
+    const arch_os_obj = entry.object.get(arch_os) orelse entry.object.get(old_arch_os) orelse std.debug.panic(
         "compiler version '{f}' does not contain an entry for arch-os '{s}'",
         .{ semantic_version, arch_os },
     );

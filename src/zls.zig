@@ -3,12 +3,9 @@
 //! until 'zls update'.
 
 const std = @import("std");
-const builtin = @import("builtin");
 
 const main = @import("main.zig");
 
-/// zigtools names builds by zig's arch names except arm
-const arch_os = if (builtin.cpu.arch == .arm) "arm" ++ main.arch_os["armv7a".len..] else main.arch_os;
 const select_version_url = "https://releases.zigtools.org/v1/zls/select-version";
 /// The zls version used for each zig version, i.e. "zls-version/0.15.2" has "0.15.1".
 const versions_basename = "zls-version";
@@ -167,8 +164,8 @@ fn querySelectVersion(
     const version_val = root.object.get("version") orelse return main.reportErr(invalid, .{ zig_version, response_path });
     if (version_val != .string) return main.reportErr(invalid, .{ zig_version, response_path });
     const zls_version = main.SemanticVersion.parse(version_val.string) orelse return main.reportErr(invalid, .{ zig_version, response_path });
-    const build = root.object.get(arch_os) orelse return main.reportErr(
-        "zls {f} (for zig {f}) has no build for " ++ arch_os,
+    const build = root.object.get(main.arch_os) orelse return main.reportErr(
+        "zls {f} (for zig {f}) has no build for " ++ main.arch_os,
         .{ zls_version, zig_version },
     );
     const tarball = if (build == .object) build.object.get("tarball") else null;
