@@ -23,6 +23,6 @@ jobs:
           ls -d /Applications/Xcode*
           sudo xcode-select -s /Applications/Xcode_${{ matrix.xcode }}.app
           xcrun --show-sdk-path
-      - uses: mlugg/setup-zig@v2
+      - uses: marler8997/setup-anyzig@master
       - run: |
           zig build install test --summary all ${{ matrix.build_args }}

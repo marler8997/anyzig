@@ -5,7 +5,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: mlugg/setup-zig@v2
+      - uses: marler8997/setup-anyzig@master
       - run: |
           zig build release --summary all
       - name: getversion
