@@ -57,7 +57,7 @@ All other arguments (i.e. `--version`, `--config-path`) are passed to zls.
 
 Installs are in `APPDATA/zls/ZLS_VERSION` and the zls saved for each zig version is in `APPDATA/zls-version/ZIG_VERSION` (see [Where Compilers Are Installed](#where-compilers-are-installed) for `APPDATA`).
 
-To use it, download the `anyzls` archive for your OS/arch from Releases (or build it with `zig build zls -- --version`, which installs it to `zig-out/bin/zls`) and either put it in your `PATH` as `zls` or point your editor's zls path setting at it. Editors start zls in the project directory, which is where anyzls looks for `build.zig.zon`. If you use VS Code, the [Zig extension](https://github.com/ziglang/vscode-zig) already manages zls for you.
+To use it, download the `anyzls` archive for your OS/arch from Releases (or build it with `zig build install-zls`, which installs it to `zig-out/bin/zls`) and either put it in your `PATH` as `zls` or point your editor's zls path setting at it. Editors start zls in the project directory, which is where anyzls looks for `build.zig.zon`. If you use VS Code, the [Zig extension](https://github.com/ziglang/vscode-zig) already manages zls for you.
 
 # TODO
 
