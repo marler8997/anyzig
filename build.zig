@@ -15,6 +15,9 @@ pub fn build(b: *std.Build) !void {
     )) |v| verifyForceVersion(v) else null;
     const release_version = if (version_option) |v| v else try makeCalVersion(b.graph.io);
     const dev_version = b.fmt("{s}-dev", .{if (version_option) |v| v else release_version});
+
+    const install_zls = b.option(bool, "install-zls", "Whether to install the anyzls executable") orelse false;
+
     const write_files_version = b.addWriteFiles();
     const release_version_file = write_files_version.add("version-release", &release_version);
     const release_version_embed = b.createModule(.{
@@ -89,6 +92,7 @@ pub fn build(b: *std.Build) !void {
         });
         setBuildOptions(b, exe, .zls);
         const install = b.addInstallArtifact(exe, .{});
+        if (install_zls) b.getInstallStep().dependOn(&install.step);
 
         const run = b.addRunArtifact(exe);
         run.step.dependOn(&install.step);
