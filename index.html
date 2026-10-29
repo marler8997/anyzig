@@ -75,7 +75,16 @@ main { max-width: 760px; margin: 0 auto; padding: 2.5em 1.25em 4em; }
 .copy:hover { color: var(--text); border-color: var(--border); }
 .copy svg { width: 1.1em; height: 1.1em; fill: none; stroke: currentColor; stroke-width: 2; }
 .copy.copied { color: var(--accent); }
-.download { margin-top: 0.9em; color: var(--muted); font-size: 0.95em; }
+.download, .note { margin-top: 0.9em; color: var(--muted); font-size: 0.95em; }
+/* --muted, fainter: secondary to the command above it */
+.note { color: rgba(154, 156, 163, 0.7); line-height: 1.9; }
+.note .cmd {
+  display: inline-flex; align-items: center; gap: 0.25em; vertical-align: middle;
+  font-family: var(--mono); font-size: 0.95em; color: var(--text); background: var(--code);
+  border: 1px solid var(--border); border-radius: 6px; padding: 0.1em 0.15em 0.1em 0.55em; white-space: nowrap;
+}
+/* the copy button, inline in the chip rather than in a command box's corner */
+.note .cmd .copy { position: static; width: 1.7em; height: 1.7em; }
 
 details { margin-top: 1.25em; background: var(--card); border: 1px solid var(--border); border-radius: 12px; }
 summary { list-style: none; cursor: pointer; padding: 1.1em 1.5em; display: flex; align-items: baseline; gap: 0.75em; flex-wrap: wrap; }
@@ -143,6 +152,7 @@ const releases = 'https://github.com/marler8997/anyzig/releases/latest/download/
 const state = { os: null, arch: null, tab: { anyzig: null, anyzls: null } };
 
 function methods(name, os) {
+  if (os === 'windows' && name === 'anyzig') return ['winget', 'PowerShell'];
   if (os === 'windows') return ['PowerShell'];
   if (os === 'macos' && name === 'anyzig') return ['brew', 'curl', 'wget'];
   return ['curl', 'wget'];
@@ -152,6 +162,7 @@ function command(name, method, basename) {
   const url = releases + basename;
   switch (method) {
     case 'brew': return 'brew tap anyzig/tap && brew install anyzig';
+    case 'winget': return 'winget install marler8997.anyzig';
     case 'curl': return 'curl -L ' + url + ' | tar xz';
     case 'wget': return 'wget -O - ' + url + ' | tar xz';
     case 'PowerShell': return 'Invoke-WebRequest -Uri ' + url + ' -OutFile "' + basename +
@@ -177,6 +188,9 @@ function render(name, heading) {
   // <wbr> lets long URLs wrap at a '/' rather than mid-word, it isn't part of the copied text
   html += '<div class="command"><code>' + command(name, state.tab[name], basename).replaceAll('/', '/<wbr>') + '</code>' +
     '<button class="copy" title="Copy" aria-label="Copy command">' + copyIcon + '</button></div>';
+  // winget's own zig package provides `zig` too, and the two overwrite each other's
+  if (state.tab[name] === 'winget') html += '<p class="note">Have zig from winget? Remove it first: <span class="cmd"><code>winget uninstall zig.zig</code>' +
+    '<button class="copy" title="Copy" aria-label="Copy command">' + copyIcon + '</button></span></p>';
   html += '<p class="download">or download <a href="' + releases + basename + '">' + basename + '</a></p>';
   el.innerHTML = html;
 }
