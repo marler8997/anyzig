@@ -796,8 +796,6 @@ fn install(
         return;
     }
 
-    if (build_options.exe == .zig and !isMachVersion(version.*) and determineVersionKind(version.*) == .release)
-        try checkRelease(arena, environ, app_data, version.*);
     const url = switch (build_options.exe) {
         .zig => try getVersionUrl(arena, environ, app_data, version.*),
         .zls => DownloadUrl.initOfficial(arena.dupe(u8, zls_url.?) catch |e| oom(e)),
@@ -810,7 +808,12 @@ fn install(
     // community mirrors only host the archives from ziglang.org
     const mirrored = std.mem.startsWith(u8, url.fetch, "https://ziglang.org/") and
         try fetchFromMirrors(arena, environ, app_data, prepared_path, archive_path, archive_name);
-    if (!mirrored) log.info("downloading {s}", .{url.fetch});
+    if (!mirrored) {
+        // an archive from a mirror has a verified signature, which proves it's a release
+        if (build_options.exe == .zig and !isMachVersion(version.*) and determineVersionKind(version.*) == .release)
+            try checkRelease(arena, environ, app_data, version.*);
+        log.info("downloading {s}", .{url.fetch});
+    }
     const hash = try cmdFetch(gpa, arena, environ, prepared_path, if (mirrored) archive_path else url.fetch);
     const fetched_path = try Dir.path.join(arena, &.{ prepared_path, hash.toSlice() });
     try moveIntoPlace(fetched_path, install_path);
@@ -1395,12 +1398,12 @@ fn makeOfficialUrl(arena: Allocator, semantic_version: SemanticVersion) Download
 }
 
 /// Fails if the official download index doesn't have the release (i.e. a typo) rather than
-/// trying to download it. Only fetches the index when the saved one doesn't have it.
+/// trying to download it. Only fetches the index when the saved one doesn't have it or is invalid.
 fn checkRelease(arena: Allocator, environ: process.Environ, app_data: [:0]const u8, version: SemanticVersion) error{Reported}!void {
     const index_path = Dir.path.join(arena, &.{ app_data, DownloadIndexKind.official.basename() }) catch |e| oom(e);
     defer arena.free(index_path);
-    const saved = indexHasVersion(index_path, version) catch |err| switch (err) {
-        error.FileNotFound => false,
+    const saved = indexHasVersion(index_path, version, .warn) catch |err| switch (err) {
+        error.FileNotFound, error.ReportedInvalidIndex => false,
         error.Reported => |e| return e,
     };
     if (saved) {
@@ -1415,8 +1418,9 @@ fn checkRelease(arena: Allocator, environ: process.Environ, app_data: [:0]const 
         error.Reported => |e| return e,
     };
     // fetchFile just wrote it, so it's an error if it's missing now
-    const fetched = indexHasVersion(index_path, version) catch |err| switch (err) {
+    const fetched = indexHasVersion(index_path, version, .err) catch |err| switch (err) {
         error.FileNotFound => |e| return pathErr("open", index_path, e),
+        error.ReportedInvalidIndex => return error.Reported,
         error.Reported => |e| return e,
     };
     if (!fetched) return reportErr(
@@ -1426,7 +1430,12 @@ fn checkRelease(arena: Allocator, environ: process.Environ, app_data: [:0]const 
 }
 
 /// Returns error.FileNotFound without reporting it, the caller decides whether it's an error.
-fn indexHasVersion(index_path: []const u8, version: SemanticVersion) error{ FileNotFound, Reported }!bool {
+/// An invalid index is logged at `invalid_level` and returns error.ReportedInvalidIndex.
+fn indexHasVersion(
+    index_path: []const u8,
+    version: SemanticVersion,
+    invalid_level: std.log.Level,
+) error{ FileNotFound, ReportedInvalidIndex, Reported }!bool {
     const file = Dir.cwd().openFile(io, index_path, .{}) catch |err| switch (err) {
         error.FileNotFound => |e| return e,
         else => |e| return pathErr("open", index_path, e),
@@ -1443,9 +1452,16 @@ fn indexHasVersion(index_path: []const u8, version: SemanticVersion) error{ File
     const version_array = version.array();
     return jsonHasTopLevelKey(&json_reader, version_array.slice()) catch |err| switch (err) {
         error.ReadFailed => pathErr("read", index_path, file_reader.err.?),
-        error.OutOfMemory => reportErr("download index '{s}' is invalid, it's nested too deeply", .{index_path}),
-        else => reportErr("download index '{s}' is invalid JSON ({t})", .{ index_path, err }),
+        error.OutOfMemory => invalidIndex(invalid_level, "download index '{s}' is invalid, it's nested too deeply", .{index_path}),
+        else => invalidIndex(invalid_level, "download index '{s}' is invalid JSON ({t})", .{ index_path, err }),
     };
+}
+
+fn invalidIndex(level: std.log.Level, comptime format: []const u8, args: anytype) error{ReportedInvalidIndex} {
+    switch (level) {
+        inline else => |l| logFn(l, .default, format, args),
+    }
+    return error.ReportedInvalidIndex;
 }
 
 /// Returns whether the top-level JSON object has `key`, skipping the values rather than
@@ -1682,8 +1698,10 @@ pub fn machIndexEntry(
             error.FileNotFound => break :try_existing_index,
             else => |e| return pathErr("read", index_path, e),
         };
-        if (findMachIndexEntry(arena, semantic_version, index_path, index_content)) |entry|
-            return entry;
+        const found = findMachIndexEntry(arena, semantic_version, index_path, index_content, .warn) catch |err| switch (err) {
+            error.ReportedInvalidIndex => break :try_existing_index,
+        };
+        if (found) |entry| return entry;
     }
 
     fetchFile(arena, environ, app_data, download_index_kind.uri(), index_path, .err) catch |err| return switch (err) {
@@ -1692,7 +1710,10 @@ pub fn machIndexEntry(
     };
     // since we just downloaded the file, this should always succeed now
     const index_content = try Dir.cwd().readFileAlloc(io, index_path, arena, .unlimited);
-    return findMachIndexEntry(arena, semantic_version, index_path, index_content) orelse
+    const found = findMachIndexEntry(arena, semantic_version, index_path, index_content, .err) catch |err| switch (err) {
+        error.ReportedInvalidIndex => return error.Reported,
+    };
+    return found orelse
         reportErr("compiler version '{f}' is missing from download index {s}", .{ semantic_version, index_path });
 }
 
@@ -1726,10 +1747,17 @@ fn findMachIndexEntry(
     semantic_version: SemanticVersion,
     index_filepath: []const u8,
     download_index: []const u8,
-) ?std.json.Value {
-    const root = std.json.parseFromSliceLeaky(std.json.Value, arena, download_index, .{}) catch |e| std.debug.panic(
-        "failed to parse download index '{s}' as JSON with {t}",
+    invalid_level: std.log.Level,
+) error{ReportedInvalidIndex}!?std.json.Value {
+    const root = std.json.parseFromSliceLeaky(std.json.Value, arena, download_index, .{}) catch |e| return invalidIndex(
+        invalid_level,
+        "download index '{s}' is invalid JSON ({t})",
         .{ index_filepath, e },
+    );
+    if (root != .object) return invalidIndex(
+        invalid_level,
+        "download index '{s}' is invalid, its top-level value isn't an object",
+        .{index_filepath},
     );
     const version_array = semantic_version.array();
     return root.object.get(version_array.slice());

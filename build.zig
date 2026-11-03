@@ -726,6 +726,40 @@ fn addTests(
             .args = &.{ "0.99.0", "version" },
         });
         t.run.addCheck(.{ .expect_stderr_match = "download-index.json' is invalid JSON (UnexpectedEndOfInput)" });
+        t.run.addCheck(.{ .expect_stderr_match = "can't check that zig 0.99.0 is a release" });
+        t.run.expectExitCode(1);
+    }
+    {
+        const t = test_factory.add(.{
+            .name = "test-index-invalid-refetched",
+            .input_dir = .no_input,
+            .options = .{ .appdata = .{ .saved_index = "{\"0.1.0\":[" } },
+            .args = &.{ "12.2.1", "version" },
+        });
+        t.run.addCheck(.{ .expect_stderr_match = "download-index.json' is invalid JSON (UnexpectedEndOfInput)" });
+        t.run.addCheck(.{ .expect_stderr_match = "zig 12.2.1 is not a release" });
+        t.run.expectExitCode(1);
+    }
+    {
+        const t = test_factory.add(.{
+            .name = "test-mach-index-invalid",
+            .input_dir = .no_input,
+            .options = .{ .appdata = .{ .saved_mach_index = "{\"0.1.0\":[" } },
+            .offline = true,
+            .args = &.{ "2099.1.0-mach", "version" },
+        });
+        t.run.addCheck(.{ .expect_stderr_match = "download-index-mach.json' is invalid JSON (UnexpectedEndOfInput)" });
+        t.run.expectExitCode(1);
+    }
+    {
+        const t = test_factory.add(.{
+            .name = "test-mach-index-invalid-refetched",
+            .input_dir = .no_input,
+            .options = .{ .appdata = .{ .saved_mach_index = "{\"0.1.0\":[" } },
+            .args = &.{ "2099.1.0-mach", "version" },
+        });
+        t.run.addCheck(.{ .expect_stderr_match = "download-index-mach.json' is invalid JSON (UnexpectedEndOfInput)" });
+        t.run.addCheck(.{ .expect_stderr_match = "compiler version '2099.1.0-mach' is missing from download index" });
         t.run.expectExitCode(1);
     }
 
