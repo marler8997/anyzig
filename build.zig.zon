@@ -16,6 +16,11 @@
             .url = "git+https://github.com/marler8997/zig-patch#c3ad78b305ba03bcd645c0bac004d1719407c6b8",
             .hash = "patch-0.0.0-WCKjsxixAADfwXQv4Vugyxo6PFbDFuuyM7ly3OiqZRYR",
         },
+        .wintrace = .{
+            .url = "git+https://github.com/marler8997/wintrace#607b689e8e972b84829f104458ad4d3f5afa8a3c",
+            .hash = "wintrace-0.0.0-RwkrxQUUAgBN2J0OGgtwOUtmhSWYBqQGsn8EpmUcTgdQ",
+            .lazy = true,
+        },
     },
     .paths = .{
         "build.zig",

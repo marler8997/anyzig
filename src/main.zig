@@ -25,12 +25,17 @@ const lockfile = @import("lockfile.zig");
 const appdata = @import("appdata.zig");
 const minisign = @import("minisign.zig");
 const zls = @import("zls.zig");
+const win32crash = @import("win32crash.zig");
 
 pub const std_options: std.Options = .{
     // debug logs are enabled at runtime with ANYZIG_VERBOSE
     .log_level = .debug,
     .logFn = logFn,
+    // on windows, win32crash.zig reports unhandled exceptions
+    .enable_segfault_handler = native_os != .windows,
 };
+
+pub const panic = std.debug.FullPanic(if (native_os == .windows) win32crash.panic else std.debug.defaultPanic);
 
 fn logFn(
     comptime level: std.log.Level,
@@ -258,10 +263,19 @@ fn determineSemanticVersion(scratch: Allocator, build_root: BuildRoot) !Semantic
 }
 
 pub fn main(init: process.Init.Minimal) !void {
+    if (native_os == .windows) {
+        if (win32.SetUnhandledExceptionFilter(&win32crash.unhandledExceptionFilter) != null) unreachable;
+        var guarantee: u32 = win32crash.stack_guarantee;
+        if (win32crash.SetThreadStackGuarantee(&guarantee) == 0)
+            std.debug.panic("SetThreadStackGuarantee failed, error={f}", .{win32.fmtError(std.os.windows.GetLastError())});
+    }
     global.verbose = init.environ.containsUnemptyConstant(verbose_env);
     run(init) catch |err| switch (err) {
         error.Reported => process.exit(1),
-        else => |e| return e,
+        else => |e| {
+            if (native_os == .windows) win32crash.exitError(e, @errorReturnTrace());
+            return e;
+        },
     };
 }
 
@@ -406,7 +420,7 @@ fn run(init: process.Init.Minimal) !void {
             // not Child.wait, it truncates the exit code to a u8 (e.g. 0xC0000005 => 5)
             switch (windows.ntdll.NtWaitForSingleObject(handle, .FALSE, null)) {
                 .WAIT_0 => {},
-                else => |status| std.debug.panic("NtWaitForSingleObject failed, status={t}", .{status}),
+                else => |status| std.debug.panic("NtWaitForSingleObject failed, status=0x{X:0>8}", .{@backingInt(status)}),
             }
             var info: windows.PROCESS.BASIC_INFORMATION = undefined;
             switch (windows.ntdll.NtQueryInformationProcess(
@@ -417,7 +431,7 @@ fn run(init: process.Init.Minimal) !void {
                 null,
             )) {
                 .SUCCESS => {},
-                else => |status| std.debug.panic("NtQueryInformationProcess failed, status={t}", .{status}),
+                else => |status| std.debug.panic("NtQueryInformationProcess failed, status=0x{X:0>8}", .{@backingInt(status)}),
             }
             const code: u32 = @bitCast(@backingInt(info.ExitStatus));
             if (code != 0) windows.ntdll.RtlExitUserProcess(code);
@@ -569,7 +583,7 @@ fn spawnWindows(
     // the processes zig starts out of it
     // null attributes, the handle must not be inheritable, zig holding it would keep the job open
     const job = win32.CreateJobObjectW(null, null) orelse
-        errExit("CreateJobObject failed, error={t}", .{windows.GetLastError()});
+        errExit("CreateJobObject failed, error={f}", .{win32.fmtError(windows.GetLastError())});
     var limits = std.mem.zeroes(win32.JOBOBJECT_EXTENDED_LIMIT_INFORMATION);
     limits.BasicLimitInformation.LimitFlags = win32.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | win32.JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK;
     if (!win32.SetInformationJobObject(
@@ -577,7 +591,7 @@ fn spawnWindows(
         win32.JobObjectExtendedLimitInformation,
         &limits,
         @sizeOf(win32.JOBOBJECT_EXTENDED_LIMIT_INFORMATION),
-    ).toBool()) errExit("SetInformationJobObject failed, error={t}", .{windows.GetLastError()});
+    ).toBool()) errExit("SetInformationJobObject failed, error={f}", .{win32.fmtError(windows.GetLastError())});
 
     var process_info: windows.PROCESS.INFORMATION = undefined;
     if (!windows.kernel32.CreateProcessW(
@@ -591,15 +605,15 @@ fn spawnWindows(
         null,
         &startup_info,
         &process_info,
-    ).toBool()) errExit("CreateProcess '{s}' failed, error={t}", .{ exe, windows.GetLastError() });
+    ).toBool()) errExit("CreateProcess '{s}' failed, error={f}", .{ exe, win32.fmtError(windows.GetLastError()) });
     if (!win32.AssignProcessToJobObject(job, process_info.hProcess).toBool()) {
         const err = windows.GetLastError();
         _ = windows.ntdll.NtTerminateProcess(process_info.hProcess, .UNSUCCESSFUL);
-        errExit("AssignProcessToJobObject '{s}' failed, error={t}", .{ exe, err });
+        errExit("AssignProcessToJobObject '{s}' failed, error={f}", .{ exe, win32.fmtError(err) });
     }
     switch (windows.ntdll.NtResumeThread(process_info.hThread, null)) {
         .SUCCESS => {},
-        else => |status| std.debug.panic("NtResumeThread failed, status={t}", .{status}),
+        else => |status| std.debug.panic("NtResumeThread failed, status=0x{X:0>8}", .{@backingInt(status)}),
     }
     windows.CloseHandle(process_info.hThread);
     return process_info.hProcess;
@@ -607,6 +621,49 @@ fn spawnWindows(
 
 const win32 = struct {
     const windows = std.os.windows;
+
+    /// Formats as `<code> (<message>)`, e.g. `5 (Access is denied.)`.
+    fn fmtError(code: windows.Win32Error) FormatError {
+        return .{ .code = code };
+    }
+    const FormatError = struct {
+        code: windows.Win32Error,
+        pub fn format(self: FormatError, w: *std.Io.Writer) std.Io.Writer.Error!void {
+            try w.print("{d} (", .{@backingInt(self.code)});
+            var buf: [300]u8 = undefined;
+            const len = FormatMessageA(
+                format_message_from_system | format_message_ignore_inserts,
+                null,
+                @backingInt(self.code),
+                0,
+                &buf,
+                buf.len,
+                null,
+            );
+            if (len == 0) {
+                try w.writeAll("unknown error");
+            } else {
+                try w.writeAll(std.mem.trimEnd(u8, buf[0..len], "\r\n"));
+                if (len + 1 >= buf.len) try w.writeAll("...");
+            }
+            try w.writeAll(")");
+        }
+    };
+    const format_message_ignore_inserts = 0x200;
+    const format_message_from_system = 0x1000;
+    extern "kernel32" fn FormatMessageA(
+        flags: u32,
+        source: ?*const anyopaque,
+        message_id: u32,
+        language_id: u32,
+        buffer: [*]u8,
+        size: u32,
+        arguments: ?*anyopaque,
+    ) callconv(.winapi) u32;
+
+    extern "kernel32" fn SetUnhandledExceptionFilter(
+        filter: ?*const fn (*windows.EXCEPTION_POINTERS) callconv(.winapi) c_long,
+    ) callconv(.winapi) ?*const anyopaque;
     extern "kernel32" fn CreateJobObjectW(
         lpJobAttributes: ?*windows.SECURITY_ATTRIBUTES,
         lpName: ?windows.LPCWSTR,

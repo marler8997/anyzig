@@ -63,6 +63,9 @@ pub fn build(b: *std.Build) !void {
             }),
         });
         setBuildOptions(b, exe, .zig);
+        if (target.result.os.tag == .windows) {
+            if (b.lazyDependency("wintrace", .{})) |dep| exe.root_module.addImport("wintrace", dep.module("wintrace"));
+        }
         const install = b.addInstallArtifact(exe, .{});
         b.getInstallStep().dependOn(&install.step);
 
@@ -88,6 +91,9 @@ pub fn build(b: *std.Build) !void {
             }),
         });
         setBuildOptions(b, exe, .zls);
+        if (target.result.os.tag == .windows) {
+            if (b.lazyDependency("wintrace", .{})) |dep| exe.root_module.addImport("wintrace", dep.module("wintrace"));
+        }
         const install = b.addInstallArtifact(exe, .{});
         b.step("install-zls", "Install the anyzls executable").dependOn(&install.step);
 
@@ -109,13 +115,15 @@ pub fn build(b: *std.Build) !void {
     {
         const unit_test_step = b.step("unit-test", "Run the unit tests");
         test_step.dependOn(unit_test_step);
-        const unit_tests = b.addRunArtifact(b.addTest(.{
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("src/test.zig"),
-                .target = b.graph.host,
-                .imports = &.{.{ .name = "zig", .module = zig_mod }},
-            }),
-        }));
+        const unit_test_module = b.createModule(.{
+            .root_source_file = b.path("src/test.zig"),
+            .target = b.graph.host,
+            .imports = &.{.{ .name = "zig", .module = zig_mod }},
+        });
+        if (b.graph.host.result.os.tag == .windows) {
+            if (b.lazyDependency("wintrace", .{})) |dep| unit_test_module.addImport("wintrace", dep.module("wintrace"));
+        }
+        const unit_tests = b.addRunArtifact(b.addTest(.{ .root_module = unit_test_module }));
         unit_test_step.dependOn(&unit_tests.step);
     }
 
@@ -1323,6 +1331,9 @@ fn addReleaseSteps(
             }),
         });
         setBuildOptions(b, zig_exe, .zig);
+        if (target.result.os.tag == .windows) {
+            if (b.lazyDependency("wintrace", .{})) |dep| zig_exe.root_module.addImport("wintrace", dep.module("wintrace"));
+        }
         install_exes.dependOn(
             &b.addInstallArtifact(zig_exe, .{ .dest_dir = .{ .override = target_dest_dir } }).step,
         );
@@ -1340,6 +1351,9 @@ fn addReleaseSteps(
             }),
         });
         setBuildOptions(b, zls_exe, .zls);
+        if (target.result.os.tag == .windows) {
+            if (b.lazyDependency("wintrace", .{})) |dep| zls_exe.root_module.addImport("wintrace", dep.module("wintrace"));
+        }
         install_exes.dependOn(
             &b.addInstallArtifact(zls_exe, .{ .dest_dir = .{ .override = target_dest_dir } }).step,
         );
