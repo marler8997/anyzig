@@ -2,11 +2,11 @@
     .name = .anyzig,
     .version = "0.0.0",
     .fingerprint = 0x7cd092f5bd0fed33, // Changing this has security and trust implications.
-    .minimum_zig_version = "0.17.0",
+    .minimum_zig_version = "0.17.1",
     .dependencies = .{
         .zig = .{
-            .url = "git+https://github.com/ziglang/zig#7647adab80dd088f4de3610fd245915a912eb6ad",
-            .hash = "zig-0.0.0-Fp4XJNPbSg7JHi19U9bkBViqpw1CEGENf1JhYBLHWjMq",
+            .url = "git+https://codeberg.org/ziglang/zig#be248cc1fdc3cc654f9ec8ba68514bcb93b204fe",
+            .hash = "zig-0.0.0-Fp4XJKFVTw6rilo4WSi3pGbVS9iih9WIXMdSGVAlZibd",
         },
         .zip = .{
             .url = "git+https://github.com/marler8997/zipcmdline#90289282eb4fa0b984e6d99cea9695e02fb043c2",

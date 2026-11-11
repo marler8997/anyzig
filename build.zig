@@ -6,7 +6,7 @@ const Exe = enum { zig, zls };
 
 pub fn build(b: *std.Build) !void {
     // zig's build script gets the version from git, which the fetched package doesn't have
-    const zig_dep = b.dependency("zig", .{ .@"version-string" = "0.17.0" });
+    const zig_dep = b.dependency("zig", .{ .@"version-string" = "0.17.1" });
 
     const version_option: ?[11]u8 = if (b.option(
         []const u8,
