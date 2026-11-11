@@ -9,8 +9,8 @@
             .hash = "zig-0.0.0-Fp4XJKFVTw6rilo4WSi3pGbVS9iih9WIXMdSGVAlZibd",
         },
         .zip = .{
-            .url = "git+https://github.com/marler8997/zipcmdline#90289282eb4fa0b984e6d99cea9695e02fb043c2",
-            .hash = "zipcmdline-0.0.0-DFii0-7PAACK7_UJ8gasN6DXAmgD5WABH2x6DNaljPQc",
+            .url = "git+https://github.com/marler8997/zipcmdline#91c3e14fb36347d7ef952b8ab74e95caa246b772",
+            .hash = "zipcmdline-0.0.0-DFii0-7PAAAXtEEiGPMCElsh9ADun8-EedbgyGKyUfCe",
         },
         .patch = .{
             .url = "git+https://github.com/marler8997/zig-patch#c3ad78b305ba03bcd645c0bac004d1719407c6b8",
