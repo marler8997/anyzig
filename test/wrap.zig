@@ -465,7 +465,7 @@ fn killAnyzig(io: std.Io, argv: []const []const u8, env: *std.process.Environ.Ma
         }
     };
     const zig_process = win32.OpenProcess(win32.SYNCHRONIZE | win32.PROCESS_TERMINATE, .FALSE, zig_pid) orelse
-        std.debug.panic("OpenProcess {} (zig) failed, error={d}", .{ zig_pid, @backingInt(windows.GetLastError()) });
+        std.debug.panic("OpenProcess {} (zig) failed, error={d}", .{ zig_pid, windows.GetLastError() });
     defer windows.CloseHandle(zig_process);
 
     // zig must be blocked on stdin, otherwise it exiting proves nothing
@@ -478,12 +478,12 @@ fn killAnyzig(io: std.Io, argv: []const []const u8, env: *std.process.Environ.Ma
 
     if (!win32.TerminateProcess(child.id.?, 1).toBool()) std.debug.panic(
         "TerminateProcess (anyzig) failed, error={d}",
-        .{@backingInt(windows.GetLastError())},
+        .{windows.GetLastError()},
     );
     // not child.wait yet, it closes stdin
     if (win32.WaitForSingleObject(child.id.?, win32.INFINITE) != win32.WAIT_OBJECT_0) std.debug.panic(
         "WaitForSingleObject (anyzig) failed, error={d}",
-        .{@backingInt(windows.GetLastError())},
+        .{windows.GetLastError()},
     );
     defer _ = child.wait(io) catch {};
 
@@ -498,7 +498,7 @@ fn killAnyzig(io: std.Io, argv: []const []const u8, env: *std.process.Environ.Ma
             std.log.err("zig (pid {}) was still running {}ms after anyzig (pid {}) was killed", .{ zig_pid, timeout_ms, anyzig_pid });
             return 0xff;
         },
-        else => |result| std.debug.panic("WaitForSingleObject returned {}, error={d}", .{ result, @backingInt(windows.GetLastError()) }),
+        else => |result| std.debug.panic("WaitForSingleObject returned {}, error={d}", .{ result, windows.GetLastError() }),
     }
 }
 
@@ -509,7 +509,7 @@ fn findChildProcess(parent_pid: u32) !?u32 {
     const snapshot = win32.CreateToolhelp32Snapshot(win32.TH32CS_SNAPPROCESS, 0);
     if (snapshot == windows.INVALID_HANDLE_VALUE) std.debug.panic(
         "CreateToolhelp32Snapshot failed, error={d}",
-        .{@backingInt(windows.GetLastError())},
+        .{windows.GetLastError()},
     );
     defer windows.CloseHandle(snapshot);
     var entry: win32.PROCESSENTRY32W = undefined;
