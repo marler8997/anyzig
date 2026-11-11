@@ -37,6 +37,10 @@ pub fn build(b: *std.Build) !void {
         .root_source_file = root,
     });
 
+    const patched_std = b.dependency("patch", .{
+        .std_patches = &[_]std.Build.LazyPath{b.path("src/std-read-timeout.patch")},
+    }).module("std");
+
     const options = b.addOptions();
     zig_mod.addOptions("build_options", options);
 
@@ -53,6 +57,7 @@ pub fn build(b: *std.Build) !void {
                 .single_threaded = true,
                 .imports = &.{
                     .{ .name = "zig", .module = zig_mod },
+                    .{ .name = "std", .module = patched_std },
                     .{
                         .name = "version",
                         .module = if (b.graph.environ_map.get("HEW_BUILD_REVISION")) |r| b.createModule(.{
@@ -86,6 +91,7 @@ pub fn build(b: *std.Build) !void {
                 .single_threaded = true,
                 .imports = &.{
                     .{ .name = "zig", .module = zig_mod },
+                    .{ .name = "std", .module = patched_std },
                     .{ .name = "version", .module = dev_version_embed },
                 },
             }),
@@ -132,7 +138,7 @@ pub fn build(b: *std.Build) !void {
     const release_step = b.step("release", "Build/archive release executables for all targets and test the native one");
     release_step.dependOn(&install_version_release_file.step);
 
-    try addReleaseSteps(b, &release_version, release_version_embed, zig_mod, release_step, host_zip_exe);
+    try addReleaseSteps(b, &release_version, release_version_embed, zig_mod, patched_std, release_step, host_zip_exe);
 }
 
 fn verifyForceVersion(v: []const u8) [11]u8 {
@@ -937,6 +943,20 @@ fn addTests(
         t.run.addCheck(.{ .expect_stderr_match = "fake mirror served 2 requests" });
         t.run.expectExitCode(1);
     }
+    {
+        // a mirror that stops sending data times out and anyzig moves on to the next one
+        const t = test_factory.add(.{
+            .name = "test-mirror-stall",
+            .input_dir = .no_input,
+            .options = .{ .appdata = .{ .mirror = .stall } },
+            .args = &.{ missing_dev_version, "version" },
+        });
+        t.run.addCheck(.{ .expect_stderr_match = "/a/zig-" });
+        t.run.addCheck(.{ .expect_stderr_match = "receiving the response failed with ConnectionTimedOut" });
+        t.run.addCheck(.{ .expect_stderr_match = "trying ziglang.org instead of the other mirrors" });
+        t.run.addCheck(.{ .expect_stderr_match = "fake mirror served 2 requests" });
+        t.run.expectExitCode(1);
+    }
     // the fake mirror only has the signature for this platform's archive
     if (b.graph.host.result.os.tag == .linux and b.graph.host.result.cpu.arch == .x86_64) {
         // the archive must match the signature
@@ -1150,7 +1170,7 @@ const TestFactory = struct {
                 corrupt_entry: ?struct { name: []const u8, content: enum { empty } } = null,
                 /// set ANYZIG_MIRRORS to two mirrors served by a fake mirror (see MirrorMode in
                 /// wrap.zig) and make ziglang.org unreachable
-                mirror: ?enum { @"not-found", @"wrong-file", @"bad-content" } = null,
+                mirror: ?enum { @"not-found", @"wrong-file", @"bad-content", stall } = null,
                 /// save these as the community mirror list from a previous download
                 saved_mirrors: []const []const u8 = &.{},
                 /// save this as the official download index from a previous download
@@ -1274,6 +1294,7 @@ fn addReleaseSteps(
     release_version: []const u8,
     release_version_embed: *std.Build.Module,
     zig_mod: *std.Build.Module,
+    patched_std: *std.Build.Module,
     release_step: *std.Build.Step,
     host_zip_exe: *std.Build.Step.Compile,
 ) !void {
@@ -1323,6 +1344,7 @@ fn addReleaseSteps(
                 .single_threaded = true,
                 .imports = &.{
                     .{ .name = "zig", .module = zig_mod },
+                    .{ .name = "std", .module = patched_std },
                     .{ .name = "version", .module = release_version_embed },
                 },
             }),
@@ -1343,6 +1365,7 @@ fn addReleaseSteps(
                 .single_threaded = true,
                 .imports = &.{
                     .{ .name = "zig", .module = zig_mod },
+                    .{ .name = "std", .module = patched_std },
                     .{ .name = "version", .module = release_version_embed },
                 },
             }),

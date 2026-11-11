@@ -1,0 +1,240 @@
+diff --git a/Io.zig b/Io.zig
+index 8993f04..af630dd 100644
+--- a/Io.zig
++++ b/Io.zig
+@@ -431,6 +431,8 @@ pub const Operation = union(enum) {
+         socket_handle: net.Socket.Handle,
+         data: [][]u8,
+         control: []u8 = &.{},
++        /// Fails with `error.ConnectionTimedOut` when no data arrives for this long.
++        timeout: ?Duration align(@max(@alignOf(usize), 4)) = null,
+ 
+         pub const Error = error{
+             SystemResources,
+diff --git a/Io/Threaded.zig b/Io/Threaded.zig
+index 5df6c2f..3e42315 100644
+--- a/Io/Threaded.zig
++++ b/Io/Threaded.zig
+@@ -2626,7 +2626,7 @@ fn operate(userdata: ?*anyopaque, operation: Io.Operation) Io.Cancelable!Io.Oper
+             },
+         },
+         .net_read => |o| return .{
+-            .net_read = netRead(o.socket_handle, o.data, o.control) catch |err| switch (err) {
++            .net_read = netRead(o.socket_handle, o.data, o.control, o.timeout) catch |err| switch (err) {
+                 error.Canceled => |e| return e,
+                 else => |e| e,
+             },
+@@ -3336,7 +3336,7 @@ fn batchDrainSubmittedWindows(t: *Threaded, b: *Io.Batch, concurrency: bool) (Io
+                 // TODO integrate with overlapped I/O or equivalent to avoid this error
+                 if (concurrency) return error.ConcurrencyUnavailable;
+                 batchCompleteBlockingWindows(b, operation_userdata, .{
+-                    .net_read = netRead(o.socket_handle, o.data, o.control) catch |err| switch (err) {
++                    .net_read = netRead(o.socket_handle, o.data, o.control, o.timeout) catch |err| switch (err) {
+                         error.Canceled => |e| return e,
+                         else => |e| e,
+                     },
+@@ -12988,13 +12988,45 @@ fn deferAcceptAfd(t: *Threaded, listen_handle: net.Socket.Handle, info: windows.
+     }
+ }
+ 
+-fn netRead(socket_handle: net.Socket.Handle, data: [][]u8, control: []u8) net.Stream.Reader.Error!net.Stream.ReadResult {
++fn netRead(socket_handle: net.Socket.Handle, data: [][]u8, control: []u8, timeout: ?Io.Duration) net.Stream.Reader.Error!net.Stream.ReadResult {
+     if (!have_networking) return error.NetworkDown;
+ 
+-    if (is_windows) return .{ .data_len = try netReadWindows(socket_handle, data) };
++    if (is_windows) return .{ .data_len = try netReadWindows(socket_handle, data, timeout) };
++    if (timeout) |t| try netWaitReadablePosix(socket_handle, t);
+     return netReadPosix(socket_handle, data, control);
+ }
+ 
++fn netWaitReadablePosix(fd: net.Socket.Handle, timeout: Io.Duration) net.Stream.Reader.Error!void {
++    const deadline = nowPosix(.awake).nanoseconds + timeout.nanoseconds;
++    var fds = [1]posix.pollfd{.{ .fd = fd, .events = posix.POLL.IN, .revents = 0 }};
++    const syscall: Syscall = try .start();
++    while (true) {
++        const remaining: Io.Duration = .{ .nanoseconds = @max(0, deadline - nowPosix(.awake).nanoseconds) };
++        // round up, so a remaining fraction of a millisecond doesn't become a busy loop
++        const ms: i32 = @intCast(@min(std.math.maxInt(i32), @divFloor(remaining.nanoseconds + std.time.ns_per_ms - 1, std.time.ns_per_ms)));
++        const rc = posix.system.poll(&fds, fds.len, ms);
++        switch (posix.errno(rc)) {
++            .SUCCESS => {
++                if (rc != 0) break;
++                if (nowPosix(.awake).nanoseconds >= deadline) {
++                    syscall.finish();
++                    return error.ConnectionTimedOut;
++                }
++            },
++            .INTR => try syscall.checkCancel(),
++            .NOMEM => {
++                syscall.finish();
++                return error.SystemResources;
++            },
++            else => |err| {
++                syscall.finish();
++                return posix.unexpectedErrno(err);
++            },
++        }
++    }
++    syscall.finish();
++}
++
+ fn netReadPosix(fd: net.Socket.Handle, data: [][]u8, control: []u8) net.Stream.Reader.Error!net.Stream.ReadResult {
+     var iovecs_buffer: [max_iovecs_len]posix.iovec = undefined;
+     var i: usize = 0;
+@@ -13092,7 +13124,7 @@ fn netReadPosix(fd: net.Socket.Handle, data: [][]u8, control: []u8) net.Stream.R
+     }
+ }
+ 
+-fn netReadWindows(socket_handle: net.Socket.Handle, data: [][]u8) net.Stream.Reader.Error!usize {
++fn netReadWindows(socket_handle: net.Socket.Handle, data: [][]u8, timeout: ?Io.Duration) net.Stream.Reader.Error!usize {
+     var iovecs: [max_iovecs_len]windows.AFD.WSABUF(.@"var") = undefined;
+     var len: u32 = 0;
+     for (data) |buf| {
+@@ -13100,15 +13132,16 @@ fn netReadWindows(socket_handle: net.Socket.Handle, data: [][]u8) net.Stream.Rea
+         addAfdBuf(.@"var", &iovecs, &len, buf);
+     }
+ 
+-    const iosb = try deviceIoControl(&.{
++    const recv_info: windows.AFD.RECV_INFO = .{
++        .BufferArray = &iovecs,
++        .BufferCount = len,
++        .AfdFlags = .{ .NO_FAST_IO = true, .OVERLAPPED = true },
++        .TdiFlags = .{ .NORMAL = true },
++    };
++    const iosb = if (timeout) |t| try afdReceiveTimeout(socket_handle, @ptrCast(&recv_info), t) else try deviceIoControl(&.{
+         .file = .{ .handle = socket_handle, .flags = .{ .nonblocking = true } },
+         .code = windows.IOCTL.AFD.RECEIVE,
+-        .in = @ptrCast(&windows.AFD.RECV_INFO{
+-            .BufferArray = &iovecs,
+-            .BufferCount = len,
+-            .AfdFlags = .{ .NO_FAST_IO = true, .OVERLAPPED = true },
+-            .TdiFlags = .{ .NORMAL = true },
+-        }),
++        .in = @ptrCast(&recv_info),
+     });
+     switch (iosb.u.Status) {
+         .SUCCESS => return iosb.Information,
+@@ -13120,6 +13153,55 @@ fn netReadWindows(socket_handle: net.Socket.Handle, data: [][]u8) net.Stream.Rea
+     }
+ }
+ 
++/// deviceIoControl's nonblocking path for an AFD receive, canceled when no data arrives for
++/// `timeout`, with its status set to IO_TIMEOUT.
++fn afdReceiveTimeout(socket_handle: net.Socket.Handle, in: []const u8, timeout: Io.Duration) Io.Cancelable!windows.IO_STATUS_BLOCK {
++    var iosb: windows.IO_STATUS_BLOCK = undefined;
++    var done: bool = false;
++    switch (windows.ntdll.NtDeviceIoControlFile(
++        socket_handle,
++        null, // event
++        flagApc,
++        &done, // APC context
++        &iosb,
++        windows.IOCTL.AFD.RECEIVE,
++        in.ptr,
++        @intCast(in.len),
++        null,
++        0,
++    )) {
++        .PENDING, .SUCCESS => {},
++        else => |status| {
++            iosb.u.Status = status;
++            return iosb;
++        },
++    }
++    const deadline = nowWindows(.awake).nanoseconds + timeout.nanoseconds;
++    while (!done) {
++        const remaining = deadline - nowWindows(.awake).nanoseconds;
++        if (remaining <= 0) {
++            var cancel_iosb: windows.IO_STATUS_BLOCK = undefined;
++            _ = windows.ntdll.NtCancelIoFileEx(socket_handle, &iosb, &cancel_iosb);
++            while (!done) waitForApcOrAlert();
++            if (iosb.u.Status == .CANCELLED) iosb.u.Status = .IO_TIMEOUT;
++            return iosb;
++        }
++        const alertable_syscall = AlertableSyscall.start() catch |err| switch (err) {
++            error.Canceled => |e| {
++                var cancel_iosb: windows.IO_STATUS_BLOCK = undefined;
++                _ = windows.ntdll.NtCancelIoFileEx(socket_handle, &iosb, &cancel_iosb);
++                while (!done) waitForApcOrAlert();
++                return e;
++            },
++        };
++        // negative is relative, in 100 ns units
++        const delay: windows.LARGE_INTEGER = -@as(windows.LARGE_INTEGER, @intCast(@divFloor(remaining + 99, 100)));
++        _ = windows.ntdll.NtDelayExecution(.TRUE, &delay);
++        alertable_syscall.finish();
++    }
++    return iosb;
++}
++
+ fn netSendPosix(
+     t: *Threaded,
+     socket_handle: net.Socket.Handle,
+diff --git a/Io/net.zig b/Io/net.zig
+index d063ad3..8fab20b 100644
+--- a/Io/net.zig
++++ b/Io/net.zig
+@@ -1334,6 +1334,8 @@ pub const Stream = struct {
+         control_truncated: bool,
+         stream: Stream,
+         err: ?Error,
++        /// Fails a read with `error.ConnectionTimedOut` when no data arrives for this long.
++        timeout: ?Io.Duration = null,
+ 
+         pub const Error = Io.Operation.NetRead.Error || Io.Cancelable;
+ 
+@@ -1382,7 +1384,16 @@ pub const Stream = struct {
+             const dest_n, const data_size = try io_r.writableVector(&iovecs_buffer, data);
+             const dest = iovecs_buffer[0..dest_n];
+             assert(dest[0].len > 0);
+-            const result = r.stream.readWithControl(io, dest, r.control_buffer[r.control_len..]) catch |err| {
++            const operation_result = io.operate(.{ .net_read = .{
++                .socket_handle = r.stream.socket.handle,
++                .data = dest,
++                .control = r.control_buffer[r.control_len..],
++                .timeout = r.timeout,
++            } }) catch |err| {
++                r.err = err;
++                return error.ReadFailed;
++            };
++            const result = operation_result.net_read catch |err| {
+                 r.err = err;
+                 return error.ReadFailed;
+             };
+diff --git a/http/Client.zig b/http/Client.zig
+index 28b3d00..d108610 100644
+--- a/http/Client.zig
++++ b/http/Client.zig
+@@ -51,6 +51,9 @@ connection_pool: ConnectionPool = .{},
+ read_buffer_size: usize = 8192,
+ /// Each `Connection` allocates this amount for the writer buffer.
+ write_buffer_size: usize = 1024,
++/// Fails a read on new connections with `error.ConnectionTimedOut` when no data arrives
++/// for this long, including during the TLS handshake.
++read_timeout: ?Io.Duration = null,
+ 
+ /// If populated, all http traffic travels through this third party.
+ /// This field cannot be modified while the client has active connections.
+@@ -271,6 +274,7 @@ pub const Connection = struct {
+                     .protocol = .plain,
+                 },
+             };
++            plain.connection.stream_reader.timeout = client.read_timeout;
+             return plain;
+         }
+ 
+@@ -321,11 +325,13 @@ pub const Connection = struct {
+             const tls: *Tls = @ptrCast(base);
+             var random_buffer: [std.crypto.tls.Client.Options.entropy_len]u8 = undefined;
+             io.random(&random_buffer);
++            var stream_reader = stream.reader(io, socket_read_buffer);
++            stream_reader.timeout = client.read_timeout;
+             tls.* = .{
+                 .connection = .{
+                     .client = client,
+                     .stream_writer = stream.writer(io, tls_write_buffer),
+-                    .stream_reader = stream.reader(io, socket_read_buffer),
++                    .stream_reader = stream_reader,
+                     .pool_node = .{},
+                     .port = port,
+                     .host_len = @intCast(remote_host.bytes.len),
