@@ -970,6 +970,10 @@ fn entryKind(dir: Dir, dir_path: []const u8, entry: Dir.Entry) !File.Kind {
     return stat.kind;
 }
 
+/// A server that sends nothing for this long fails with error.ConnectionTimedOut, so a stalled
+/// mirror moves on to the next one instead of hanging forever.
+const read_timeout: std.Io.Duration = .fromSeconds(30);
+
 /// The server is down, unreachable or misbehaving, so another server could work. Anything else
 /// (i.e. out of memory, out of file descriptors, the local network is down) would fail the same
 /// way on every server.
@@ -1837,7 +1841,7 @@ pub fn fetchFile(
     const node = root.start(progress_node_name, 1);
     defer node.end();
 
-    var client: std.http.Client = .{ .allocator = scratch, .io = io };
+    var client: std.http.Client = .{ .allocator = scratch, .io = io, .read_timeout = read_timeout };
     defer client.deinit();
     initProxies(&client, scratch, environ) catch |err| std.debug.panic(
         "fetch '{f}': init proxy failed with {t}",
@@ -1922,7 +1926,7 @@ fn cmdFetch(
 ) !Package.Hash {
     const color: Color = .auto;
 
-    var http_client: std.http.Client = .{ .allocator = gpa, .io = io };
+    var http_client: std.http.Client = .{ .allocator = gpa, .io = io, .read_timeout = read_timeout };
     defer http_client.deinit();
     try initProxies(&http_client, arena, environ);
 

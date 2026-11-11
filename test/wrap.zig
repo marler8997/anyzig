@@ -366,6 +366,8 @@ const MirrorMode = enum {
     @"wrong-file",
     /// serves the signature for zig-x86_64-linux-0.14.1.tar.xz and an archive that doesn't match it
     @"bad-content",
+    /// mirror a never responds, mirror b responds 404
+    stall,
 };
 
 // https://ziglang.org/download/0.14.1/zig-x86_64-linux-0.14.1.tar.xz.minisig
@@ -417,28 +419,35 @@ fn runWithMirror(io: std.Io, arena: std.mem.Allocator, argv: []const []const u8,
 fn serveMirror(io: std.Io, server: *std.Io.net.Server, mode: MirrorMode, request_count: *std.atomic.Value(u32)) void {
     while (true) {
         const stream = server.accept(io) catch |err| std.debug.panic("fake mirror accept failed with {t}", .{err});
-        defer stream.close(io);
-        var recv_buf: [8 * 1024]u8 = undefined;
-        var send_buf: [8 * 1024]u8 = undefined;
-        var reader = stream.reader(io, &recv_buf);
-        var writer = stream.writer(io, &send_buf);
-        var http_server = std.http.Server.init(&reader.interface, &writer.interface);
-        var request = http_server.receiveHead() catch |err| std.debug.panic("fake mirror receive failed with {t}", .{err});
-        _ = request_count.fetchAdd(1, .monotonic);
-        const target = request.head.target;
-        const path = target[0 .. std.mem.findScalar(u8, target, '?') orelse target.len];
-        const is_signature = std.mem.endsWith(u8, path, ".minisig");
-        const content: ?[]const u8 = switch (mode) {
-            .@"not-found" => null,
-            .@"wrong-file" => if (is_signature) zig_0_14_1_x86_64_linux_signature else null,
-            .@"bad-content" => if (is_signature) zig_0_14_1_x86_64_linux_signature else "not the signed archive",
-        };
-        const result = if (content) |c|
-            request.respond(c, .{ .keep_alive = false })
-        else
-            request.respond("", .{ .status = .not_found, .keep_alive = false });
-        result catch |err| std.debug.panic("fake mirror respond failed with {t}", .{err});
+        // a stalled connection stays open, anyzig has to give up on it
+        if (serveRequest(io, stream, mode, request_count) == .stalled) continue;
+        stream.close(io);
     }
+}
+
+fn serveRequest(io: std.Io, stream: std.Io.net.Stream, mode: MirrorMode, request_count: *std.atomic.Value(u32)) enum { responded, stalled } {
+    var recv_buf: [8 * 1024]u8 = undefined;
+    var send_buf: [8 * 1024]u8 = undefined;
+    var reader = stream.reader(io, &recv_buf);
+    var writer = stream.writer(io, &send_buf);
+    var http_server = std.http.Server.init(&reader.interface, &writer.interface);
+    var request = http_server.receiveHead() catch |err| std.debug.panic("fake mirror receive failed with {t}", .{err});
+    _ = request_count.fetchAdd(1, .monotonic);
+    const target = request.head.target;
+    const path = target[0 .. std.mem.findScalar(u8, target, '?') orelse target.len];
+    const is_signature = std.mem.endsWith(u8, path, ".minisig");
+    if (mode == .stall and std.mem.startsWith(u8, path, "/a/")) return .stalled;
+    const content: ?[]const u8 = switch (mode) {
+        .@"not-found", .stall => null,
+        .@"wrong-file" => if (is_signature) zig_0_14_1_x86_64_linux_signature else null,
+        .@"bad-content" => if (is_signature) zig_0_14_1_x86_64_linux_signature else "not the signed archive",
+    };
+    const result = if (content) |c|
+        request.respond(c, .{ .keep_alive = false })
+    else
+        request.respond("", .{ .status = .not_found, .keep_alive = false });
+    result catch |err| std.debug.panic("fake mirror respond failed with {t}", .{err});
+    return .responded;
 }
 
 /// The fake zig --kill installs, anyzig runs it with "anyzig 9.9.9 fake-zig-block-stdin"
