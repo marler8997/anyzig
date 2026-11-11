@@ -5,5 +5,4 @@ test {
     _ = @import("lockfile.zig");
     _ = @import("minisign.zig");
     _ = @import("TmpFile.zig");
-    if (@import("builtin").os.tag == .windows) _ = @import("win32crash.zig");
 }

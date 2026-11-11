@@ -120,9 +120,6 @@ pub fn build(b: *std.Build) !void {
             .target = b.graph.host,
             .imports = &.{.{ .name = "zig", .module = zig_mod }},
         });
-        if (b.graph.host.result.os.tag == .windows) {
-            if (b.lazyDependency("wintrace", .{})) |dep| unit_test_module.addImport("wintrace", dep.module("wintrace"));
-        }
         const unit_tests = b.addRunArtifact(b.addTest(.{ .root_module = unit_test_module }));
         unit_test_step.dependOn(&unit_tests.step);
     }

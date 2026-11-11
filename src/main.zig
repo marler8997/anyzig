@@ -25,17 +25,18 @@ const lockfile = @import("lockfile.zig");
 const appdata = @import("appdata.zig");
 const minisign = @import("minisign.zig");
 const zls = @import("zls.zig");
-const win32crash = @import("win32crash.zig");
+const wintrace = @import("wintrace");
+pub const wintrace_options: wintrace.Options = .{ .mode = .symbolize };
 
 pub const std_options: std.Options = .{
     // debug logs are enabled at runtime with ANYZIG_VERBOSE
     .log_level = .debug,
     .logFn = logFn,
-    // on windows, win32crash.zig reports unhandled exceptions
+    // on windows, wintrace.unhandledExceptionFilter reports unhandled exceptions
     .enable_segfault_handler = native_os != .windows,
 };
 
-pub const panic = std.debug.FullPanic(if (native_os == .windows) win32crash.panic else std.debug.defaultPanic);
+pub const panic = if (native_os == .windows) wintrace.panic else std.debug.FullPanic(std.debug.defaultPanic);
 
 fn logFn(
     comptime level: std.log.Level,
@@ -264,16 +265,16 @@ fn determineSemanticVersion(scratch: Allocator, build_root: BuildRoot) !Semantic
 
 pub fn main(init: process.Init.Minimal) !void {
     if (native_os == .windows) {
-        if (win32.SetUnhandledExceptionFilter(&win32crash.unhandledExceptionFilter) != null) unreachable;
-        var guarantee: u32 = win32crash.stack_guarantee;
-        if (win32crash.SetThreadStackGuarantee(&guarantee) == 0)
+        if (wintrace.SetUnhandledExceptionFilter(&wintrace.unhandledExceptionFilter) != null) unreachable;
+        var guarantee: u32 = wintrace.stack_guarantee;
+        if (wintrace.SetThreadStackGuarantee(&guarantee) == 0)
             std.debug.panic("SetThreadStackGuarantee failed, error={f}", .{win32.fmtError(std.os.windows.GetLastError())});
     }
     global.verbose = init.environ.containsUnemptyConstant(verbose_env);
     run(init) catch |err| switch (err) {
         error.Reported => process.exit(1),
         else => |e| {
-            if (native_os == .windows) win32crash.exitError(e, @errorReturnTrace());
+            if (native_os == .windows) wintrace.exitWithErrorTrace(e, @errorReturnTrace());
             return e;
         },
     };
@@ -420,7 +421,7 @@ fn run(init: process.Init.Minimal) !void {
             // not Child.wait, it truncates the exit code to a u8 (e.g. 0xC0000005 => 5)
             switch (windows.ntdll.NtWaitForSingleObject(handle, .FALSE, null)) {
                 .WAIT_0 => {},
-                else => |status| std.debug.panic("NtWaitForSingleObject failed, status=0x{X:0>8}", .{@backingInt(status)}),
+                else => |status| std.debug.panic("NtWaitForSingleObject failed, status=0x{X:0>8}", .{status}),
             }
             var info: windows.PROCESS.BASIC_INFORMATION = undefined;
             switch (windows.ntdll.NtQueryInformationProcess(
@@ -431,7 +432,7 @@ fn run(init: process.Init.Minimal) !void {
                 null,
             )) {
                 .SUCCESS => {},
-                else => |status| std.debug.panic("NtQueryInformationProcess failed, status=0x{X:0>8}", .{@backingInt(status)}),
+                else => |status| std.debug.panic("NtQueryInformationProcess failed, status=0x{X:0>8}", .{status}),
             }
             const code: u32 = @bitCast(@backingInt(info.ExitStatus));
             if (code != 0) windows.ntdll.RtlExitUserProcess(code);
@@ -613,7 +614,7 @@ fn spawnWindows(
     }
     switch (windows.ntdll.NtResumeThread(process_info.hThread, null)) {
         .SUCCESS => {},
-        else => |status| std.debug.panic("NtResumeThread failed, status=0x{X:0>8}", .{@backingInt(status)}),
+        else => |status| std.debug.panic("NtResumeThread failed, status=0x{X:0>8}", .{status}),
     }
     windows.CloseHandle(process_info.hThread);
     return process_info.hProcess;
@@ -629,7 +630,7 @@ const win32 = struct {
     const FormatError = struct {
         code: windows.Win32Error,
         pub fn format(self: FormatError, w: *std.Io.Writer) std.Io.Writer.Error!void {
-            try w.print("{d} (", .{@backingInt(self.code)});
+            try w.print("{d} (", .{self.code});
             var buf: [300]u8 = undefined;
             const len = FormatMessageA(
                 format_message_from_system | format_message_ignore_inserts,
@@ -661,9 +662,6 @@ const win32 = struct {
         arguments: ?*anyopaque,
     ) callconv(.winapi) u32;
 
-    extern "kernel32" fn SetUnhandledExceptionFilter(
-        filter: ?*const fn (*windows.EXCEPTION_POINTERS) callconv(.winapi) c_long,
-    ) callconv(.winapi) ?*const anyopaque;
     extern "kernel32" fn CreateJobObjectW(
         lpJobAttributes: ?*windows.SECURITY_ATTRIBUTES,
         lpName: ?windows.LPCWSTR,
@@ -1880,8 +1878,8 @@ pub fn fetchFile(
     if (response.head.status != .ok) {
         const err = fetchFail(
             fail_level,
-            "fetch '{f}': HTTP response {} \"{s}\"",
-            .{ uri, @backingInt(response.head.status), response.head.status.phrase() orelse "" },
+            "fetch '{f}': HTTP response {d} \"{s}\"",
+            .{ uri, response.head.status, response.head.status.phrase() orelse "" },
         );
         return if (response.head.status == .not_found) error.ReportedHttpNotFound else err;
     }
