@@ -12,7 +12,7 @@ index 8993f04..af630dd 100644
          pub const Error = error{
              SystemResources,
 diff --git a/Io/Threaded.zig b/Io/Threaded.zig
-index 5df6c2f..3e42315 100644
+index 5df6c2f..6b394f8 100644
 --- a/Io/Threaded.zig
 +++ b/Io/Threaded.zig
 @@ -2626,7 +2626,7 @@ fn operate(userdata: ?*anyopaque, operation: Io.Operation) Io.Cancelable!Io.Oper
@@ -33,7 +33,7 @@ index 5df6c2f..3e42315 100644
                          error.Canceled => |e| return e,
                          else => |e| e,
                      },
-@@ -12988,13 +12988,45 @@ fn deferAcceptAfd(t: *Threaded, listen_handle: net.Socket.Handle, info: windows.
+@@ -12988,13 +12988,52 @@ fn deferAcceptAfd(t: *Threaded, listen_handle: net.Socket.Handle, info: windows.
      }
  }
  
@@ -48,18 +48,17 @@ index 5df6c2f..3e42315 100644
  }
  
 +fn netWaitReadablePosix(fd: net.Socket.Handle, timeout: Io.Duration) net.Stream.Reader.Error!void {
-+    const deadline = nowPosix(.awake).nanoseconds + timeout.nanoseconds;
++    // milliseconds rather than nowPosix, its i96 math in this loop crashes zig 0.17.1 compiling for s390x
++    const deadline = awakeMilliseconds() + std.math.lossyCast(i64, timeout.toMilliseconds());
 +    var fds = [1]posix.pollfd{.{ .fd = fd, .events = posix.POLL.IN, .revents = 0 }};
 +    const syscall: Syscall = try .start();
 +    while (true) {
-+        const remaining: Io.Duration = .{ .nanoseconds = @max(0, deadline - nowPosix(.awake).nanoseconds) };
-+        // round up, so a remaining fraction of a millisecond doesn't become a busy loop
-+        const ms: i32 = @intCast(@min(std.math.maxInt(i32), @divFloor(remaining.nanoseconds + std.time.ns_per_ms - 1, std.time.ns_per_ms)));
-+        const rc = posix.system.poll(&fds, fds.len, ms);
++        const remaining = @max(0, deadline - awakeMilliseconds());
++        const rc = posix.system.poll(&fds, fds.len, std.math.lossyCast(i32, remaining));
 +        switch (posix.errno(rc)) {
 +            .SUCCESS => {
 +                if (rc != 0) break;
-+                if (nowPosix(.awake).nanoseconds >= deadline) {
++                if (awakeMilliseconds() >= deadline) {
 +                    syscall.finish();
 +                    return error.ConnectionTimedOut;
 +                }
@@ -78,10 +77,18 @@ index 5df6c2f..3e42315 100644
 +    syscall.finish();
 +}
 +
++fn awakeMilliseconds() i64 {
++    var timespec: posix.timespec = undefined;
++    switch (posix.errno(posix.system.clock_gettime(clockToPosix(.awake), &timespec))) {
++        .SUCCESS => return @as(i64, timespec.sec) * std.time.ms_per_s + @divFloor(timespec.nsec, std.time.ns_per_ms),
++        else => unreachable, // the awake clock always exists
++    }
++}
++
  fn netReadPosix(fd: net.Socket.Handle, data: [][]u8, control: []u8) net.Stream.Reader.Error!net.Stream.ReadResult {
      var iovecs_buffer: [max_iovecs_len]posix.iovec = undefined;
      var i: usize = 0;
-@@ -13092,7 +13124,7 @@ fn netReadPosix(fd: net.Socket.Handle, data: [][]u8, control: []u8) net.Stream.R
+@@ -13092,7 +13131,7 @@ fn netReadPosix(fd: net.Socket.Handle, data: [][]u8, control: []u8) net.Stream.R
      }
  }
  
@@ -90,7 +97,7 @@ index 5df6c2f..3e42315 100644
      var iovecs: [max_iovecs_len]windows.AFD.WSABUF(.@"var") = undefined;
      var len: u32 = 0;
      for (data) |buf| {
-@@ -13100,15 +13132,16 @@ fn netReadWindows(socket_handle: net.Socket.Handle, data: [][]u8) net.Stream.Rea
+@@ -13100,15 +13139,16 @@ fn netReadWindows(socket_handle: net.Socket.Handle, data: [][]u8) net.Stream.Rea
          addAfdBuf(.@"var", &iovecs, &len, buf);
      }
  
@@ -114,7 +121,7 @@ index 5df6c2f..3e42315 100644
      });
      switch (iosb.u.Status) {
          .SUCCESS => return iosb.Information,
-@@ -13120,6 +13153,55 @@ fn netReadWindows(socket_handle: net.Socket.Handle, data: [][]u8) net.Stream.Rea
+@@ -13120,6 +13160,55 @@ fn netReadWindows(socket_handle: net.Socket.Handle, data: [][]u8) net.Stream.Rea
      }
  }
  
