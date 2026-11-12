@@ -13,12 +13,12 @@
             .hash = "zipcmdline-0.0.0-DFii0-7PAAAXtEEiGPMCElsh9ADun8-EedbgyGKyUfCe",
         },
         .patch = .{
-            .url = "git+https://github.com/marler8997/zig-patch#c3ad78b305ba03bcd645c0bac004d1719407c6b8",
-            .hash = "patch-0.0.0-WCKjsxixAADfwXQv4Vugyxo6PFbDFuuyM7ly3OiqZRYR",
+            .url = "git+https://github.com/marler8997/zig-patch#a07269f3501ffd9d2ddc66bb1c653b22a7b88c57",
+            .hash = "patch-0.0.0-WCKjsxe0AABrWokeY0HNhJVBNMavAbFnjas7lMDaMMMp",
         },
         .wintrace = .{
-            .url = "git+https://github.com/marler8997/wintrace#a9f20380f18bc5ca0397998cf06426c53df6e1a6",
-            .hash = "wintrace-0.0.0-RwkrxVc4AgCAdPIxSldz50VSHSS9lkEGiWyxmQkEF0cE",
+            .url = "git+https://github.com/marler8997/wintrace#cc3abae1a2bf983d18ef12e7dc3c25841f4af561",
+            .hash = "wintrace-0.0.0-RwkrxRZ2AgCW4RIfUAeI75IB8shdP6warZnLxfxvEC0X",
             .lazy = true,
         },
     },
